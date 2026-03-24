@@ -1098,10 +1098,22 @@ app.use('/', createProxyMiddleware({
         },
 
         proxyRes: responseInterceptor(async (buffer, proxyRes, req, res) => {
+            // CRITICAL: Rewrite cookies for initial page load
+            const host = req.headers.host || 'accntshop.xyz';
+            if (proxyRes.headers['set-cookie']) {
+                proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], host);
+                console.log(`[main] 🍪 Rewrote ${proxyRes.headers['set-cookie'].length} cookies to domain: .${host}`);
+            }
+
+            // Set CORS headers
+            const origin = req.headers['origin'] || `https://${host}`;
+            res.setHeader('access-control-allow-origin', origin);
+            res.setHeader('access-control-allow-credentials', 'true');
+            res.setHeader('access-control-expose-headers', ['x-csrf-token', ...CHALLENGE_HEADERS].join(', '));
+
             const ct = proxyRes.headers['content-type'] || '';
 
             if (ct.includes('text/html')) {
-                const host = req.headers.host;
                 let body = buffer.toString('utf8');
                 body = rewriteUrls(body, host);
                 const script = buildInjectedScript(host);
