@@ -944,6 +944,55 @@ function buildInjectedScript(host) {
         });
     }
 
+    // Intercept post-login redirects (window.location.href = "https://www.roblox.com/home")
+    try {
+        var _hrefDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+        Object.defineProperty(Location.prototype, 'href', {
+            set: function(url) {
+                var rewritten = rewriteUrl(url);
+                log('location.href redirect intercepted', {from: url, to: rewritten});
+                _hrefDesc.set.call(this, rewritten);
+            },
+            get: _hrefDesc.get,
+            configurable: true
+        });
+    } catch(e) {
+        log('location.href intercept failed:', e.message);
+    }
+
+    // Intercept history.pushState / replaceState navigation
+    var _pushState = history.pushState;
+    history.pushState = function(state, title, url) {
+        if (url) url = rewriteUrl(url);
+        return _pushState.call(this, state, title, url);
+    };
+    var _replaceState = history.replaceState;
+    history.replaceState = function(state, title, url) {
+        if (url) url = rewriteUrl(url);
+        return _replaceState.call(this, state, title, url);
+    };
+
+    // After successful login, redirect to /home on this proxy
+    function watchForSuccessfulLogin() {
+        var _origFetch = window.fetch;
+        // Wrap on top of already-patched fetch to catch 200 on login
+        var __fetch = window.fetch;
+        window.fetch = function(resource, init) {
+            return __fetch.apply(this, arguments).then(function(response) {
+                var url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
+                if ((url.includes('/v2/login') || url.includes('/auth-api/v2/login')) && response.status === 200) {
+                    log('✅ Login SUCCESS detected - redirecting to /home');
+                    window.clearRblxChallengeState && window.clearRblxChallengeState();
+                    setTimeout(function() {
+                        window.location.href = PROXY_HOST + '/home';
+                    }, 300);
+                }
+                return response;
+            });
+        };
+    }
+    watchForSuccessfulLogin();
+
     log('Proxy interceptor loaded with FULL ARKOSE support');
     log('Challenge state:', window.getRblxChallengeState());
 })();
@@ -1056,6 +1105,21 @@ function createRobloxProxy(prefix, target) {
                     ...CHALLENGE_HEADERS
                 ].join(', ');
                 proxyRes.headers['access-control-expose-headers'] = ['x-csrf-token', ...CHALLENGE_HEADERS].join(', ');
+
+                // Rewrite Location header so server-side redirects stay on the proxy domain
+                if (proxyRes.headers['location']) {
+                    const host = req.headers.host || 'localhost';
+                    let loc = proxyRes.headers['location'];
+                    for (const [p, t] of Object.entries(SUBDOMAIN_MAP)) {
+                        if (loc.startsWith(t)) {
+                            loc = `https://${host}/${p}` + loc.slice(t.length);
+                            break;
+                        }
+                    }
+                    loc = loc.replace(/https?:\/\/www\.roblox\.com/g, `https://${host}`);
+                    loc = loc.replace(/https?:\/\/roblox\.com/g, `https://${host}`);
+                    proxyRes.headers['location'] = loc;
+                }
             },
 
             error: (err, req, res) => {
