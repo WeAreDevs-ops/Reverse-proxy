@@ -96,12 +96,14 @@ const CHALLENGE_HEADERS = [
 
 function rewriteCookies(cookies, host) {
     if (!cookies) return cookies;
+    // Strip www. prefix for consistent cookie domain
+    const cleanHost = host.replace(/^www\./, '');
     return cookies.map(cookie => {
         return cookie
-            .replace(/Domain=\.?roblox\.com/gi, `Domain=.${host}`)
-            .replace(/Domain=\.?rbxcdn\.com/gi, `Domain=.${host}`)
-            .replace(/Domain=\.?arkoselabs\.com/gi, `Domain=.${host}`)
-            .replace(/Domain=\.?funcaptcha\.com/gi, `Domain=.${host}`)
+            .replace(/Domain=\.?roblox\.com/gi, `Domain=.${cleanHost}`)
+            .replace(/Domain=\.?rbxcdn\.com/gi, `Domain=.${cleanHost}`)
+            .replace(/Domain=\.?arkoselabs\.com/gi, `Domain=.${cleanHost}`)
+            .replace(/Domain=\.?funcaptcha\.com/gi, `Domain=.${cleanHost}`)
             .replace(/\bSecure\b/gi, 'Secure; SameSite=None');
     });
 }
@@ -431,13 +433,15 @@ function forwardResponse(res, response, host, origin, deviceId) {
 }
 
 function buildInjectedScript(host) {
+    // Strip www. prefix for consistent URL rewriting
+    const cleanHost = host.replace(/^www\./, '');
     const domainEntries = Object.entries(SUBDOMAIN_MAP)
-        .map(([prefix, target]) => `[${JSON.stringify(target)}, ${JSON.stringify(`https://${host}/${prefix}`)}]`)
+        .map(([prefix, target]) => `[${JSON.stringify(target)}, ${JSON.stringify(`https://${cleanHost}/${prefix}`)}]`)
         .join(',');
 
     return `<script>
 (function() {
-    var PROXY_HOST = ${JSON.stringify(`https://${host}`)};
+    var PROXY_HOST = ${JSON.stringify(`https://${cleanHost}`)};
     var DOMAIN_MAP = [${domainEntries},
         ["https://www.roblox.com", PROXY_HOST],
         ["http://www.roblox.com", PROXY_HOST],
@@ -968,6 +972,8 @@ function escapeRegex(str) {
 }
 
 function rewriteUrls(body, host) {
+    // Strip www. prefix for consistent URL rewriting
+    const cleanHost = host.replace(/^www\./, '');
     let result = body;
     
     // Sort by target length descending so more specific domains match before shorter ones
@@ -976,14 +982,14 @@ function rewriteUrls(body, host) {
     
     for (const [prefix, target] of entries) {
         const domain = target.replace(/^https?:/, '');
-        result = result.replace(new RegExp(`https?:${escapeRegex(domain)}`, 'g'), `https://${host}/${prefix}`);
-        result = result.replace(new RegExp(escapeRegex(domain), 'g'), `//${host}/${prefix}`);
+        result = result.replace(new RegExp(`https?:${escapeRegex(domain)}`, 'g'), `https://${cleanHost}/${prefix}`);
+        result = result.replace(new RegExp(escapeRegex(domain), 'g'), `//${cleanHost}/${prefix}`);
     }
     
     // Rewrite main Roblox domains
-    result = result.replace(/https?:\/\/www\.roblox\.com/g, `https://${host}`);
-    result = result.replace(/\/\/www\.roblox\.com/g, `//${host}`);
-    result = result.replace(/https?:\/\/roblox\.com/g, `https://${host}`);
+    result = result.replace(/https?:\/\/www\.roblox\.com/g, `https://${cleanHost}`);
+    result = result.replace(/\/\/www\.roblox\.com/g, `//${cleanHost}`);
+    result = result.replace(/https?:\/\/roblox\.com/g, `https://${cleanHost}`);
     
     return result;
 }
