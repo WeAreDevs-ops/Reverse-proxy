@@ -3,6 +3,7 @@ const { createProxyMiddleware, responseInterceptor } = require('http-proxy-middl
 const https = require('https');
 const http = require('http');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const { URL } = require('url');
 
 const app = express();
 
@@ -448,7 +449,9 @@ app.use('/auth-api/v2/login', express.raw({ type: '*/*' }), async (req, res) => 
 
     } catch (err) {
         console.error('[login] Error:', err.message);
-        res.status(502).json({ error: 'Proxy error', message: err.message });
+        if (!res.headersSent) {
+            res.status(502).json({ error: 'Proxy error', message: err.message });
+        }
     }
 });
 
@@ -1204,14 +1207,29 @@ app.options('*', (req, res) => {
     res.sendStatus(200);
 });
 
+// Create a custom HTTPS agent that properly handles CONNECT proxies
+function createArkoseAgent(proxyUrl) {
+    const parsedProxy = new URL(proxyUrl);
+    
+    // Create agent with proper TLS settings for Cloudflare
+    return new HttpsProxyAgent(proxyUrl, {
+        rejectUnauthorized: true,
+        // Enable TLS session reuse for better performance
+        maxCachedSessions: 100,
+        // Set proper timeout
+        timeout: 30000,
+    });
+}
+
 function createRobloxProxy(prefix, target) {
     const isArkose = target.includes('arkoselabs.com') || target.includes('funcaptcha.com') || target.includes('rbxcdn.com');
     
     // Use residential proxy ONLY for Arkose Labs to bypass IP blocking
     let agent;
+    let proxyUrl = null;
     if (isArkose) {
-        const proxyUrl = getNextProxy();
-        agent = new HttpsProxyAgent(proxyUrl);
+        proxyUrl = getNextProxy();
+        agent = createArkoseAgent(proxyUrl);
         console.log(`[${prefix}] 🌍 Using residential proxy: ${proxyUrl.split('@')[1]}`);
     } else {
         agent = target.startsWith('https:') ? httpsAgent : httpAgent;
@@ -1227,34 +1245,52 @@ function createRobloxProxy(prefix, target) {
         agent,
         
         on: {
-            proxyReq: (proxyReq, req) => {
-                // For Arkose/rbxcdn, use their own origin/referer
-                if (isArkose) {
-                    const arkoseOrigin = target.replace(/\/+$/, '');
-                    proxyReq.setHeader('origin', arkoseOrigin);
-                    proxyReq.setHeader('referer', `${arkoseOrigin}/`);
-                } else {
-                    proxyReq.setHeader('origin', 'https://www.roblox.com');
-                    proxyReq.setHeader('referer', 'https://www.roblox.com/login');
+            proxyReq: (proxyReq, req, res) => {
+                // GUARD: Check if response has already been sent
+                if (res.headersSent || res.writableEnded) {
+                    console.log(`[${prefix}] ⚠️ Response already sent, skipping header modifications`);
+                    return;
                 }
                 
-                proxyReq.setHeader('user-agent', req.headers['user-agent'] || BROWSER_UA);
-                proxyReq.setHeader('accept', req.headers['accept'] || 'application/json, text/plain, */*');
-                proxyReq.setHeader('accept-language', 'en-US,en;q=0.9');
-                proxyReq.setHeader('accept-encoding', 'gzip, deflate, br');
-                proxyReq.setHeader('connection', 'keep-alive');
-                
-                if (req.headers['x-csrf-token']) proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
-                if (req.headers['rbx-device-id']) proxyReq.setHeader('rbx-device-id', req.headers['rbx-device-id']);
-                if (req.headers['rbxdeviceid']) proxyReq.setHeader('rbxdeviceid', req.headers['rbxdeviceid']);
-                if (req.headers['x-bound-auth-token']) proxyReq.setHeader('x-bound-auth-token', req.headers['x-bound-auth-token']);
-                
-                for (const h of CHALLENGE_HEADERS) {
-                    if (req.headers[h]) proxyReq.setHeader(h, req.headers[h]);
+                try {
+                    // For Arkose/rbxcdn, use their own origin/referer
+                    if (isArkose) {
+                        const arkoseOrigin = target.replace(/\/+$/, '');
+                        // Only set headers if proxyReq is still writable
+                        if (!proxyReq.destroyed && !proxyReq.aborted) {
+                            proxyReq.setHeader('origin', arkoseOrigin);
+                            proxyReq.setHeader('referer', `${arkoseOrigin}/`);
+                        }
+                    } else {
+                        if (!proxyReq.destroyed && !proxyReq.aborted) {
+                            proxyReq.setHeader('origin', 'https://www.roblox.com');
+                            proxyReq.setHeader('referer', 'https://www.roblox.com/login');
+                        }
+                    }
+                    
+                    if (!proxyReq.destroyed && !proxyReq.aborted) {
+                        proxyReq.setHeader('user-agent', req.headers['user-agent'] || BROWSER_UA);
+                        proxyReq.setHeader('accept', req.headers['accept'] || 'application/json, text/plain, */*');
+                        proxyReq.setHeader('accept-language', 'en-US,en;q=0.9');
+                        proxyReq.setHeader('accept-encoding', 'gzip, deflate, br');
+                        proxyReq.setHeader('connection', 'keep-alive');
+                        
+                        if (req.headers['x-csrf-token']) proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
+                        if (req.headers['rbx-device-id']) proxyReq.setHeader('rbx-device-id', req.headers['rbx-device-id']);
+                        if (req.headers['rbxdeviceid']) proxyReq.setHeader('rbxdeviceid', req.headers['rbxdeviceid']);
+                        if (req.headers['x-bound-auth-token']) proxyReq.setHeader('x-bound-auth-token', req.headers['x-bound-auth-token']);
+                        
+                        for (const h of CHALLENGE_HEADERS) {
+                            if (req.headers[h]) proxyReq.setHeader(h, req.headers[h]);
+                        }
+                    }
+                } catch (err) {
+                    console.log(`[${prefix}] ⚠️ Error setting headers: ${err.message}`);
+                    // Don't throw - let the proxy continue
                 }
             },
 
-            proxyRes: (proxyRes, req) => {
+            proxyRes: (proxyRes, req, res) => {
                 // Log successful Arkose Labs responses
                 if (isArkose && proxyRes.statusCode === 200) {
                     console.log(`[${prefix}] ✅ ${req.method} ${req.path} → ${proxyRes.statusCode}`);
@@ -1284,7 +1320,9 @@ function createRobloxProxy(prefix, target) {
 
             error: (err, req, res) => {
                 if (req.path === '/www/e.png' || req.path === '/pe') {
-                    res.status(204).end();
+                    if (!res.headersSent) {
+                        res.status(204).end();
+                    }
                     return;
                 }
                 console.error(`[${prefix}] ❌ ${req.method} ${req.path} | ${err.code}: ${err.message}`);
