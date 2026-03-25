@@ -1,25 +1,13 @@
 {
-  "name": "roblox-pure-login-proxy",
-  "version": "1.0.0",
-  "description": "Pure login proxy for Roblox - credentials never stored",
+  "name": "roblox-login-proxy",
+  "version": "2.0.0",
+  "description": "Roblox login proxy with Arkose Labs support",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node index.js"
+    "start": "node index.js"
   },
-  "keywords": [
-    "roblox",
-    "proxy",
-    "login",
-    "pure-login",
-    "hba"
-  ],
   "dependencies": {
     "express": "^4.18.2",
     "http-proxy-middleware": "^3.0.0"
-  },
-  "engines": {
-    "node": ">=18.0.0",
-    "npm": ">=9.0.0"
   }
 }
