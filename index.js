@@ -29,13 +29,13 @@ async function testResidentialProxy() {
 
     try {
         const agent = new HttpsProxyAgent(testProxy, {
+            keepAlive: true,
             timeout: 10000,
             rejectUnauthorized: true
         });
 
         const req = https.get('https://arkoselabs.roblox.com/v2/476068BF-9607-4799-B53D-966BE98E2B81/api.js', {
             agent,
-            timeout: 10000,
             headers: {
                 'User-Agent': BROWSER_UA
             }
@@ -46,13 +46,16 @@ async function testResidentialProxy() {
             } else {
                 console.log(`⚠️ Residential proxy returned status ${res.statusCode}`);
             }
+            // IMPORTANT: Consume the response body to close the connection
+            res.resume();
         });
 
         req.on('error', (err) => {
             console.error('❌ Residential proxy test failed:', err.message);
         });
 
-        req.on('timeout', () => {
+        // Set timeout using setTimeout instead of event
+        req.setTimeout(10000, () => {
             console.error('❌ Residential proxy test timed out');
             req.destroy();
         });
@@ -1250,29 +1253,9 @@ function createRobloxProxy(prefix, target) {
     const isArkose = target.includes('arkoselabs.com') || target.includes('funcaptcha.com') || target.includes('rbxcdn.com');
     
     // Use residential proxy for Arkose Labs to bypass IP blocking
-    let agent;
+    let agent = target.startsWith('https:') ? httpsAgent : httpAgent;
     if (isArkose) {
-        const proxyUrl = getNextResidentialProxy();
-        console.log(`[${prefix}] Using residential proxy: ${proxyUrl.split('@')[1]}`);
-
-        // Properly configure the proxy agent with timeouts and keep-alive
-        const agentOptions = {
-            keepAlive: true,
-            keepAliveMsecs: 30000,
-            maxSockets: 50,
-            maxFreeSockets: 10,
-            timeout: 30000,
-            rejectUnauthorized: true,
-            headers: {
-                'User-Agent': BROWSER_UA
-            }
-        };
-
-        agent = target.startsWith('https:') 
-            ? new HttpsProxyAgent(proxyUrl, agentOptions)
-            : new HttpProxyAgent(proxyUrl, agentOptions);
-    } else {
-        agent = target.startsWith('https:') ? httpsAgent : httpAgent;
+        console.log(`[${prefix}] Will use residential proxy for requests`);
     }
     
     return createProxyMiddleware({
@@ -1283,9 +1266,16 @@ function createRobloxProxy(prefix, target) {
         proxyTimeout: 30000,
         timeout: 30000,
         agent,
+        // Use upstream proxy for Arkose requests
+        proxy: isArkose ? getNextResidentialProxy() : undefined,
         
         on: {
             proxyReq: (proxyReq, req) => {
+                // Debug logging for Arkose requests
+                if (isArkose) {
+                    console.log(`[${prefix}] → ${req.method} ${target}${req.path}`);
+                }
+
                 // For Arkose/rbxcdn, use their own origin/referer
                 if (isArkose) {
                     const arkoseOrigin = target.replace(/\/+$/, '');
