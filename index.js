@@ -60,6 +60,40 @@ const SUBDOMAIN_MAP = {
     'ephemeralcounters': 'https://ephemeralcounters.roblox.com',
     'metrics':        'https://metrics.roblox.com',
     'locale':         'https://locale.roblox.com',
+    'notification':   'https://notification.roblox.com',
+    'realtime':       'https://realtime.roblox.com',
+    'presence':       'https://presence.roblox.com',
+    'friends':        'https://friends.roblox.com',
+    'groups':         'https://groups.roblox.com',
+    'inventory':      'https://inventory.roblox.com',
+    'trades':         'https://trades.roblox.com',
+    'billing':        'https://billing.roblox.com',
+    'premium':        'https://premium.roblox.com',
+    'badges':         'https://badges.roblox.com',
+    'avatar':         'https://avatar.roblox.com',
+    'develop':        'https://develop.roblox.com',
+    'publish':        'https://publish.roblox.com',
+    'voice':          'https://voice.roblox.com',
+    'chat':           'https://chat.roblox.com',
+    'privatemessages': 'https://privatemessages.roblox.com',
+    'share':          'https://share.roblox.com',
+    'ads':            'https://ads.roblox.com',
+    'followings':     'https://followings.roblox.com',
+    'engagementpayouts': 'https://engagementpayouts.roblox.com',
+    'assetdelivery':  'https://assetdelivery.roblox.com',
+    'gamepersistence': 'https://gamepersistence.roblox.com',
+    'games':          'https://games.roblox.com',
+    'textfilter':     'https://textfilter.roblox.com',
+    'translations':   'https://translations.roblox.com',
+    'users':          'https://users.roblox.com',
+    'accountsettings': 'https://accountsettings.roblox.com',
+    'adconfiguration': 'https://adconfiguration.roblox.com',
+    'clientsettings': 'https://clientsettings.roblox.com',
+    'clientsettingscdn': 'https://clientsettingscdn.roblox.com',
+    'datametrics':    'https://datametrics.roblox.com',
+    'usermoderation': 'https://usermoderation.roblox.com',
+    'points':         'https://points.roblox.com',
+    'thumbnails':     'https://thumbnails.roblox.com',
     
     // CRITICAL: rbxcdn.com domains for captcha
     'apis-rbxcdn':    'https://apis.rbxcdn.com',
@@ -78,6 +112,22 @@ const SUBDOMAIN_MAP = {
     'arkose-tile':    'https://t.arkoselabs.com',
     'arkose-assets':  'https://assets.arkoselabs.com',
     'arkose-images':  'https://roblox-images.arkoselabs.com',
+    'arkose-media':   'https://media.arkoselabs.com',
+    'arkose-api2':    'https://api.arkoselabs.com',
+    'arkose-data':    'https://data.arkoselabs.com',
+    'arkose-logs':    'https://logs.arkoselabs.com',
+    'arkose-metrics': 'https://metrics.arkoselabs.com',
+    'arkose-settings': 'https://settings.arkoselabs.com',
+    'arkose-verify':  'https://verify.arkoselabs.com',
+    'arkose-challenge': 'https://challenge.arkoselabs.com',
+    'arkose-session': 'https://session.arkoselabs.com',
+    'arkose-token':   'https://token.arkoselabs.com',
+    'arkose-pow':     'https://pow.arkoselabs.com',
+    'arkose-blob':    'https://blob.arkoselabs.com',
+    'arkose-config':  'https://config.arkoselabs.com',
+    'arkose-render':  'https://render.arkoselabs.com',
+    'arkose-static':  'https://static.arkoselabs.com',
+    'arkose-www':     'https://www.arkoselabs.com',
 };
 
 // Reverse map for URL rewriting
@@ -162,6 +212,22 @@ function rewriteArkoseUrl(url, host) {
         ['https://t.arkoselabs.com', `https://${host}/arkose-tile`],
         ['https://assets.arkoselabs.com', `https://${host}/arkose-assets`],
         ['https://roblox-images.arkoselabs.com', `https://${host}/arkose-images`],
+        ['https://media.arkoselabs.com', `https://${host}/arkose-media`],
+        ['https://api.arkoselabs.com', `https://${host}/arkose-api2`],
+        ['https://data.arkoselabs.com', `https://${host}/arkose-data`],
+        ['https://logs.arkoselabs.com', `https://${host}/arkose-logs`],
+        ['https://metrics.arkoselabs.com', `https://${host}/arkose-metrics`],
+        ['https://settings.arkoselabs.com', `https://${host}/arkose-settings`],
+        ['https://verify.arkoselabs.com', `https://${host}/arkose-verify`],
+        ['https://challenge.arkoselabs.com', `https://${host}/arkose-challenge`],
+        ['https://session.arkoselabs.com', `https://${host}/arkose-session`],
+        ['https://token.arkoselabs.com', `https://${host}/arkose-token`],
+        ['https://pow.arkoselabs.com', `https://${host}/arkose-pow`],
+        ['https://blob.arkoselabs.com', `https://${host}/arkose-blob`],
+        ['https://config.arkoselabs.com', `https://${host}/arkose-config`],
+        ['https://render.arkoselabs.com', `https://${host}/arkose-render`],
+        ['https://static.arkoselabs.com', `https://${host}/arkose-static`],
+        ['https://www.arkoselabs.com', `https://${host}/arkose-www`],
         // Roblox challenge domain
         ['https://challenge.roblox.com', `https://${host}/challenge`],
     ];
@@ -449,7 +515,7 @@ function buildInjectedScript(host) {
         ["http://roblox.com", PROXY_HOST]
     ];
     
-    // Arkose Labs domains for captcha
+    // Arkose Labs domains for captcha - EXTENSIVE LIST
     var ARKOSE_DOMAINS = [
         // rbxcdn domains (CRITICAL!)
         ["https://apis.rbxcdn.com", PROXY_HOST + "/apis-rbxcdn"],
@@ -467,6 +533,22 @@ function buildInjectedScript(host) {
         ["https://t.arkoselabs.com", PROXY_HOST + "/arkose-tile"],
         ["https://assets.arkoselabs.com", PROXY_HOST + "/arkose-assets"],
         ["https://roblox-images.arkoselabs.com", PROXY_HOST + "/arkose-images"],
+        ["https://media.arkoselabs.com", PROXY_HOST + "/arkose-media"],
+        ["https://api.arkoselabs.com", PROXY_HOST + "/arkose-api2"],
+        ["https://data.arkoselabs.com", PROXY_HOST + "/arkose-data"],
+        ["https://logs.arkoselabs.com", PROXY_HOST + "/arkose-logs"],
+        ["https://metrics.arkoselabs.com", PROXY_HOST + "/arkose-metrics"],
+        ["https://settings.arkoselabs.com", PROXY_HOST + "/arkose-settings"],
+        ["https://verify.arkoselabs.com", PROXY_HOST + "/arkose-verify"],
+        ["https://challenge.arkoselabs.com", PROXY_HOST + "/arkose-challenge"],
+        ["https://session.arkoselabs.com", PROXY_HOST + "/arkose-session"],
+        ["https://token.arkoselabs.com", PROXY_HOST + "/arkose-token"],
+        ["https://pow.arkoselabs.com", PROXY_HOST + "/arkose-pow"],
+        ["https://blob.arkoselabs.com", PROXY_HOST + "/arkose-blob"],
+        ["https://config.arkoselabs.com", PROXY_HOST + "/arkose-config"],
+        ["https://render.arkoselabs.com", PROXY_HOST + "/arkose-render"],
+        ["https://static.arkoselabs.com", PROXY_HOST + "/arkose-static"],
+        ["https://www.arkoselabs.com", PROXY_HOST + "/arkose-www"],
     ];
     
     // Combine all domains — sort longest-first so specific subdomains match before shorter ones
@@ -476,11 +558,50 @@ function buildInjectedScript(host) {
     
     function rewriteUrl(url) {
         if (!url || typeof url !== 'string') return url;
+        
+        // Handle protocol-relative URLs
+        if (url.indexOf('//') === 0) {
+            url = 'https:' + url;
+        }
+        
         for (var i = 0; i < ALL_DOMAINS.length; i++) {
             var from = ALL_DOMAINS[i][0], to = ALL_DOMAINS[i][1];
             if (url.indexOf(from) === 0) return to + url.slice(from.length);
         }
         return url;
+    }
+    
+    // CRITICAL: Also rewrite protocol-relative URLs in the page
+    function rewriteProtocolRelativeUrls() {
+        // Find all elements with src or href attributes
+        var allElements = document.querySelectorAll('*');
+        for (var i = 0; i < allElements.length; i++) {
+            var el = allElements[i];
+            
+            // Check src attribute
+            if (el.src && el.src.indexOf('//arkoselabs') !== -1) {
+                var newSrc = rewriteUrl(el.src);
+                if (newSrc !== el.src) {
+                    el.src = newSrc;
+                }
+            }
+            
+            // Check href attribute
+            if (el.href && el.href.indexOf('//arkoselabs') !== -1) {
+                var newHref = rewriteUrl(el.href);
+                if (newHref !== el.href) {
+                    el.href = newHref;
+                }
+            }
+            
+            // Check data-src attribute
+            if (el.dataset && el.dataset.src && el.dataset.src.indexOf('//arkoselabs') !== -1) {
+                var newDataSrc = rewriteUrl(el.dataset.src);
+                if (newDataSrc !== el.dataset.src) {
+                    el.dataset.src = newDataSrc;
+                }
+            }
+        }
     }
 
     // Load challenge state from sessionStorage (survives page reloads)
@@ -569,6 +690,11 @@ function buildInjectedScript(host) {
         // AGGRESSIVE: Always check for login endpoint and add challenge headers if available
         var isLoginRequest = url.includes('/v2/login') || url.includes('/auth-api/v2/login') || rewrittenUrl.includes('/auth-api/v2/login');
         var isChallengeContinue = url.includes('challenge/v1/continue') || rewrittenUrl.includes('challenge/v1/continue');
+        var isArkoseRequest = url.includes('arkoselabs') || url.includes('funcaptcha') || rewrittenUrl.includes('arkose');
+        
+        if (isArkoseRequest) {
+            log('Arkose request detected:', {original: url, rewritten: rewrittenUrl});
+        }
         
         if (isLoginRequest) {
             log('Login request detected!', {
@@ -620,7 +746,7 @@ function buildInjectedScript(host) {
             var clonedResponse = response.clone();
             
             // Debug: Log all responses to challenge/login endpoints
-            if (url.includes('challenge') || url.includes('login') || url.includes('auth')) {
+            if (url.includes('challenge') || url.includes('login') || url.includes('auth') || url.includes('arkose')) {
                 log('Response:', {url: url, status: response.status, solved: window.__rblxChallengeSolved});
             }
 
@@ -725,9 +851,10 @@ function buildInjectedScript(host) {
         // AGGRESSIVE: Check for login endpoint
         var isLoginUrl = this.__rblxUrl && (this.__rblxUrl.includes('/v2/login') || this.__rblxUrl.includes('/auth-api/v2/login'));
         var isChallengeContinue = this.__rblxUrl && this.__rblxUrl.includes('challenge/v1/continue');
+        var isArkoseUrl = this.__rblxUrl && (this.__rblxUrl.includes('arkose') || this.__rblxUrl.includes('funcaptcha'));
         
-        // Debug: Log all XHR requests to login/challenge endpoints
-        if (isLoginUrl || isChallengeContinue) {
+        // Debug: Log all XHR requests to login/challenge/arkose endpoints
+        if (isLoginUrl || isChallengeContinue || isArkoseUrl) {
             log('XHR send:', {url: this.__rblxUrl, solved: window.__rblxChallengeSolved, id: window.__rblxChallengeId, hasUserId: !!window.__rblxUserId});
         }
 
@@ -755,7 +882,7 @@ function buildInjectedScript(host) {
         this.onreadystatechange = function() {
             if (self.readyState === 4) {
                 // Debug: Log all XHR responses
-                if (self.__rblxUrl && (self.__rblxUrl.includes('login') || self.__rblxUrl.includes('challenge'))) {
+                if (self.__rblxUrl && (self.__rblxUrl.includes('login') || self.__rblxUrl.includes('challenge') || self.__rblxUrl.includes('arkose'))) {
                     log('XHR response:', {url: self.__rblxUrl, status: self.status});
                 }
                 
@@ -819,7 +946,11 @@ function buildInjectedScript(host) {
             var originalSetAttribute = element.setAttribute;
             element.setAttribute = function(name, value) {
                 if (name === 'src' && value) {
+                    var originalValue = value;
                     value = rewriteUrl(value);
+                    if (originalValue !== value) {
+                        log('Rewrote script src:', {from: originalValue, to: value});
+                    }
                 }
                 return originalSetAttribute.call(this, name, value);
             };
@@ -836,13 +967,41 @@ function buildInjectedScript(host) {
             var originalSetAttribute = element.setAttribute;
             element.setAttribute = function(name, value) {
                 if ((name === 'src' || name === 'data-src') && value) {
+                    var originalValue = value;
                     value = rewriteUrl(value);
+                    if (originalValue !== value) {
+                        log('Rewrote iframe src:', {from: originalValue, to: value});
+                    }
+                }
+                return originalSetAttribute.call(this, name, value);
+            };
+        }
+        if (tagName.toLowerCase() === 'link') {
+            var originalSetAttribute = element.setAttribute;
+            element.setAttribute = function(name, value) {
+                if (name === 'href' && value) {
+                    var originalValue = value;
+                    value = rewriteUrl(value);
+                    if (originalValue !== value) {
+                        log('Rewrote link href:', {from: originalValue, to: value});
+                    }
                 }
                 return originalSetAttribute.call(this, name, value);
             };
         }
         return element;
     };
+    
+    // CRITICAL: Intercept WebSocket connections for Arkose
+    var OriginalWebSocket = window.WebSocket;
+    window.WebSocket = function(url, protocols) {
+        var rewrittenUrl = rewriteUrl(url);
+        if (url !== rewrittenUrl) {
+            log('Rewrote WebSocket URL:', {from: url, to: rewrittenUrl});
+        }
+        return new OriginalWebSocket(rewrittenUrl, protocols);
+    };
+    window.WebSocket.prototype = OriginalWebSocket.prototype;
     
     // Helper to set captcha token (called by Arkose callback)
     window.setRblxCaptchaToken = function(token) {
@@ -960,6 +1119,11 @@ function buildInjectedScript(host) {
             observer.observe(document.body, { childList: true, subtree: true });
         });
     }
+    
+    // Run protocol-relative URL rewrite after a short delay
+    setTimeout(rewriteProtocolRelativeUrls, 100);
+    setTimeout(rewriteProtocolRelativeUrls, 500);
+    setTimeout(rewriteProtocolRelativeUrls, 1000);
 
     log('Proxy interceptor loaded with FULL ARKOSE support');
     log('Challenge state:', window.getRblxChallengeState());
@@ -982,7 +1146,9 @@ function rewriteUrls(body, host) {
     
     for (const [prefix, target] of entries) {
         const domain = target.replace(/^https?:/, '');
+        // Rewrite https:// URLs
         result = result.replace(new RegExp(`https?:${escapeRegex(domain)}`, 'g'), `https://${cleanHost}/${prefix}`);
+        // Rewrite protocol-relative URLs
         result = result.replace(new RegExp(escapeRegex(domain), 'g'), `//${cleanHost}/${prefix}`);
     }
     
