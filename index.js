@@ -1205,20 +1205,20 @@ app.options('*', (req, res) => {
     res.sendStatus(200);
 });
 
+// Per-request residential proxy agents for Arkose — rotates on every request
+function makeArkoseAgent(target) {
+    const proxyUrl = getNextResidentialProxy();
+    const agent = target.startsWith('https:')
+        ? new HttpsProxyAgent(proxyUrl)
+        : new HttpProxyAgent(proxyUrl);
+    return { agent, proxyLabel: proxyUrl.split('@')[1] };
+}
+
 function createRobloxProxy(prefix, target) {
     const isArkose = target.includes('arkoselabs.com') || target.includes('funcaptcha.com') || target.includes('rbxcdn.com');
     
-    // Use residential proxy for Arkose Labs to bypass IP blocking
-    let agent;
-    if (isArkose) {
-        const proxyUrl = getNextResidentialProxy();
-        agent = target.startsWith('https:') 
-            ? new HttpsProxyAgent(proxyUrl)
-            : new HttpProxyAgent(proxyUrl);
-        console.log(`[${prefix}] Using residential proxy: ${proxyUrl.split('@')[1]}`);
-    } else {
-        agent = target.startsWith('https:') ? httpsAgent : httpAgent;
-    }
+    // Non-Arkose routes use shared keep-alive agents
+    const staticAgent = target.startsWith('https:') ? httpsAgent : httpAgent;
     
     return createProxyMiddleware({
         target,
@@ -1227,15 +1227,21 @@ function createRobloxProxy(prefix, target) {
         pathRewrite: { [`^/${prefix}`]: '' },
         proxyTimeout: 30000,
         timeout: 30000,
-        agent,
+        // For Arkose, agent is set per-request in proxyReq; for others use static
+        agent: isArkose ? undefined : staticAgent,
         
         on: {
             proxyReq: (proxyReq, req) => {
-                // For Arkose/rbxcdn, use their own origin/referer
+                // Rotate residential proxy per-request for Arkose
                 if (isArkose) {
-                    const arkoseOrigin = target.replace(/\/+$/, '');
-                    proxyReq.setHeader('origin', arkoseOrigin);
-                    proxyReq.setHeader('referer', `${arkoseOrigin}/`);
+                    const { agent: arkAgent, proxyLabel } = makeArkoseAgent(target);
+                    // Inject the residential proxy agent on this request's socket
+                    req.__arkoseAgent = arkAgent;
+                    proxyReq.agent = arkAgent;
+                    console.log(`[${prefix}] Residential proxy: ${proxyLabel}`);
+                    // Arkose ALWAYS expects origin from roblox.com — NEVER from arkoselabs.com
+                    proxyReq.setHeader('origin', 'https://www.roblox.com');
+                    proxyReq.setHeader('referer', 'https://www.roblox.com/login');
                 } else {
                     proxyReq.setHeader('origin', 'https://www.roblox.com');
                     proxyReq.setHeader('referer', 'https://www.roblox.com/login');
@@ -1365,6 +1371,18 @@ app.use('/', createProxyMiddleware({
 }));
 
 const PORT = process.env.PORT || 8080;
+
+// Prevent server crash from unhandled errors
+process.on('uncaughtException', (err) => {
+    console.error('❌ UNCAUGHT EXCEPTION (server kept alive):', err.message, err.stack);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('❌ UNHANDLED REJECTION (server kept alive):', reason);
+});
+
+// Health check endpoint so Cloudflare can verify the host is alive
+app.get('/_health', (req, res) => res.status(200).send('OK'));
+
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Proxy running on port ${PORT}`);
     console.log(`📋 rbxcdn.com domains mapped:`);
