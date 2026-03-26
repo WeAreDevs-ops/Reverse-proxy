@@ -1224,9 +1224,113 @@ function rewriteUrls(body, host) {
     result = result.replace(/https?:\/\/www\.roblox\.com/g, `https://${cleanHost}`);
     result = result.replace(/\/\/www\.roblox\.com/g, `//${cleanHost}`);
     result = result.replace(/https?:\/\/roblox\.com/g, `https://${cleanHost}`);
-    
+
+    // FIX 3a: Rewrite the hashed EnvironmentUrls CDN script to our custom override route.
+    // The real file contains hardcoded roblox.com hostnames that bypass our fetch interceptor.
+    result = result.replace(
+        /https?:\/\/[^"'\s]+[a-f0-9]{10,}-EnvironmentUrls\.js/g,
+        `https://${cleanHost}/js/EnvironmentUrls.js`
+    );
+    // Also catch the non-hashed variant (e.g. /js/EnvironmentUrls.js on www.roblox.com)
+    result = result.replace(
+        /(src=["'])(?:https?:\/\/[^"'\s]+\/)?EnvironmentUrls\.js(["'])/g,
+        `$1https://${cleanHost}/js/EnvironmentUrls.js$2`
+    );
+
+    // FIX 3b: Remove crossorigin="use-credentials" from the prelude script tag.
+    // Sending credentials cross-origin on that path causes CORS preflight to fail
+    // after it gets re-routed through the proxy.
+    result = result.replace(
+        /(<script[^>]+id="prelude"[^>]*)\s+crossorigin="use-credentials"/g,
+        '$1'
+    );
+
     return result;
 }
+
+// ─────────────────────────────────────────────────────────────
+// FIX 1: Redirect mis-routed prelude script
+// rewriteUrls() turns https://apis.roblox.com → /apis-api, so the
+// prelude <script> ends up at /apis-api/rotating-client-service/...
+// We catch it here and redirect to the correct proxied path.
+// ─────────────────────────────────────────────────────────────
+app.get('/apis-api/rotating-client-service/v1/prelude/latest', (req, res) => {
+    console.log('[prelude] Redirecting mis-routed prelude to correct path');
+    res.redirect(302, '/rotating-client-service/v1/prelude/latest');
+});
+
+// ─────────────────────────────────────────────────────────────
+// FIX 2: Serve a custom EnvironmentUrls.js so Roblox JS reads
+// proxy URLs from the very start, before any fetch interceptor.
+// The competitor does this — serving /js/EnvironmentUrls.js from
+// their own server instead of proxying the real CDN file.
+// ─────────────────────────────────────────────────────────────
+app.get('/js/EnvironmentUrls.js', (req, res) => {
+    const host = (req.headers.host || 'localhost').replace(/^www\./, '');
+    const h = `https://${host}`;
+    console.log(`[EnvironmentUrls] Serving custom EnvironmentUrls.js for host: ${host}`);
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.send(`
+(function() {
+    var Roblox = window.Roblox = window.Roblox || {};
+    Roblox.EnvironmentUrls = {
+        apiGatewayUrl:                  "${h}/apis-api",
+        authApi:                        "${h}/auth-api",
+        apiProxyUrl:                    "${h}/api-api",
+        economyApi:                     "${h}/economy-api",
+        usersApi:                       "${h}/users-api",
+        catalogApi:                     "${h}/catalog-api",
+        gamesApi:                       "${h}/games-api",
+        thumbnailsApi:                  "${h}/thumbnails-api",
+        ecsv2Api:                       "${h}/ecsv2-api",
+        contentUrl:                     "${h}/content-cdn",
+        authTokenServiceUrl:            "${h}/auth-token-service",
+        hbaServiceUrl:                  "${h}/hba-service",
+        proofOfWorkServiceUrl:          "${h}/proof-of-work-service",
+        accountSecurityServiceUrl:      "${h}/account-security-service",
+        rotatingClientServiceUrl:       "${h}/rotating-client-service",
+        guacV2Url:                      "${h}/guac-v2",
+        productExperimentationPlatformUrl: "${h}/product-experimentation-platform",
+        otpServiceUrl:                  "${h}/otp-service",
+        challengeUrl:                   "${h}/challenge",
+        captchaUrl:                     "${h}/captcha",
+        abuseUrl:                       "${h}/abuse",
+        clientTelemetryUrl:             "${h}/client-telemetry",
+        ephemeralCountersUrl:           "${h}/ephemeralcounters",
+        metricsUrl:                     "${h}/metrics",
+        localeUrl:                      "${h}/locale",
+        notificationUrl:                "${h}/notification",
+        realtimeUrl:                    "${h}/realtime",
+        presenceUrl:                    "${h}/presence",
+        friendsUrl:                     "${h}/friends",
+        groupsUrl:                      "${h}/groups",
+        inventoryUrl:                   "${h}/inventory",
+        tradesUrl:                      "${h}/trades",
+        billingUrl:                     "${h}/billing",
+        premiumUrl:                     "${h}/premium",
+        badgesUrl:                      "${h}/badges",
+        avatarUrl:                      "${h}/avatar",
+        developUrl:                     "${h}/develop",
+        publishUrl:                     "${h}/publish",
+        voiceUrl:                       "${h}/voice",
+        chatUrl:                        "${h}/chat",
+        privateMessagesUrl:             "${h}/privatemessages",
+        shareUrl:                       "${h}/share",
+        adsUrl:                         "${h}/ads",
+        followingsUrl:                  "${h}/followings",
+        accountSettingsUrl:             "${h}/accountsettings",
+        clientSettingsUrl:              "${h}/clientsettings",
+        clientSettingsCdnUrl:           "${h}/clientsettingscdn",
+        websiteUrl:                     "${h}",
+        wwwUrl:                         "${h}",
+        // Arkose / FunCaptcha
+        captchaProvider:                "ARKOSE_LABS",
+        arkoselabsBaseUrl:              "${h}/arkoselabs-rbxcdn",
+    };
+})();
+`);
+});
 
 app.use((req, res, next) => {
     const start = Date.now();
