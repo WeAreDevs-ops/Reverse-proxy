@@ -235,6 +235,13 @@ function rewriteChallengeMetadata(metadata, host) {
             data.fcTokenUrl = rewriteArkoseUrl(data.fcTokenUrl, host);
         }
         
+        // CRITICAL: Rewrite captchaToken URLs if present
+        if (data.captchaToken) {
+            // The captchaToken contains encoded URL parameters that need rewriting
+            // Format: token|r=region|meta=...|cdn_url=...|surl=...|smurl=...
+            data.captchaToken = rewriteCaptchaTokenUrls(data.captchaToken, host);
+        }
+        
         return Buffer.from(JSON.stringify(data)).toString('base64');
     } catch (e) {
         console.log('   Failed to rewrite challenge metadata:', e.message);
@@ -242,46 +249,72 @@ function rewriteChallengeMetadata(metadata, host) {
     }
 }
 
+// Rewrite URLs in captchaToken string
+function rewriteCaptchaTokenUrls(token, host) {
+    if (!token || typeof token !== 'string') return token;
+    
+    const cleanHost = host.replace(/^www\./, '');
+    
+    // Replace Arkose URLs in the token string
+    let rewritten = token;
+    
+    // Replace URL-encoded versions
+    const replacements = [
+        ['https%3A%2F%2Farkoselabs.roblox.com', `https%3A%2F%2F${cleanHost}%2Farkoselabs-rbxcdn`],
+        ['https%3A%2F%2Fcdn.arkoselabs.com', `https%3A%2F%2F${cleanHost}%2Farkose-cdn`],
+        ['https%3A%2F%2Fclient-api.arkoselabs.com', `https%3A%2F%2F${cleanHost}%2Farkose-client`],
+        ['https%3A%2F%2Froblox-api.arkoselabs.com', `https%3A%2F%2F${cleanHost}%2Farkose-api`],
+    ];
+    
+    for (const [from, to] of replacements) {
+        rewritten = rewritten.replace(new RegExp(from, 'g'), to);
+    }
+    
+    return rewritten;
+}
+
 // Rewrite Arkose Labs URLs to proxy
 function rewriteArkoseUrl(url, host) {
     if (!url || typeof url !== 'string') return url;
     
+    const cleanHost = host.replace(/^www\./, '');
+    
     // All domains that need to be proxied
     const domains = [
         // rbxcdn domains
-        ['https://apis.rbxcdn.com', `https://${host}/apis-rbxcdn`],
-        ['https://captcha.rbxcdn.com', `https://${host}/captcha-rbxcdn`],
-        ['https://arkoselabs.roblox.com', `https://${host}/arkoselabs-rbxcdn`],
+        ['https://apis.rbxcdn.com', `https://${cleanHost}/apis-rbxcdn`],
+        ['https://captcha.rbxcdn.com', `https://${cleanHost}/captcha-rbxcdn`],
+        ['https://arkoselabs.roblox.com', `https://${cleanHost}/arkoselabs-rbxcdn`],
         // Arkose Labs domains
-        ['https://roblox-api.arkoselabs.com', `https://${host}/arkose-api`],
-        ['https://client-api.arkoselabs.com', `https://${host}/arkose-client`],
-        ['https://cdn.arkoselabs.com', `https://${host}/arkose-cdn`],
-        ['https://ssl.arkoselabs.com', `https://${host}/arkose-ssl`],
-        ['https://funcaptcha.com', `https://${host}/arkose-funcaptcha`],
-        ['https://fc.arkoselabs.com', `https://${host}/arkose-fc`],
-        ['https://fc-cdn.arkoselabs.com', `https://${host}/arkose-fc-cdn`],
-        ['https://game.arkoselabs.com', `https://${host}/arkose-game`],
-        ['https://t.arkoselabs.com', `https://${host}/arkose-tile`],
-        ['https://assets.arkoselabs.com', `https://${host}/arkose-assets`],
-        ['https://roblox-images.arkoselabs.com', `https://${host}/arkose-images`],
-        ['https://media.arkoselabs.com', `https://${host}/arkose-media`],
-        ['https://api.arkoselabs.com', `https://${host}/arkose-api2`],
-        ['https://data.arkoselabs.com', `https://${host}/arkose-data`],
-        ['https://logs.arkoselabs.com', `https://${host}/arkose-logs`],
-        ['https://metrics.arkoselabs.com', `https://${host}/arkose-metrics`],
-        ['https://settings.arkoselabs.com', `https://${host}/arkose-settings`],
-        ['https://verify.arkoselabs.com', `https://${host}/arkose-verify`],
-        ['https://challenge.arkoselabs.com', `https://${host}/arkose-challenge`],
-        ['https://session.arkoselabs.com', `https://${host}/arkose-session`],
-        ['https://token.arkoselabs.com', `https://${host}/arkose-token`],
-        ['https://pow.arkoselabs.com', `https://${host}/arkose-pow`],
-        ['https://blob.arkoselabs.com', `https://${host}/arkose-blob`],
-        ['https://config.arkoselabs.com', `https://${host}/arkose-config`],
-        ['https://render.arkoselabs.com', `https://${host}/arkose-render`],
-        ['https://static.arkoselabs.com', `https://${host}/arkose-static`],
-        ['https://www.arkoselabs.com', `https://${host}/arkose-www`],
+        ['https://roblox-api.arkoselabs.com', `https://${cleanHost}/arkose-api`],
+        ['https://client-api.arkoselabs.com', `https://${cleanHost}/arkose-client`],
+        ['https://cdn.arkoselabs.com', `https://${cleanHost}/arkose-cdn`],
+        ['https://ssl.arkoselabs.com', `https://${cleanHost}/arkose-ssl`],
+        ['https://funcaptcha.com', `https://${cleanHost}/arkose-funcaptcha`],
+        ['https://fc.arkoselabs.com', `https://${cleanHost}/arkose-fc`],
+        ['https://fc-cdn.arkoselabs.com', `https://${cleanHost}/arkose-fc-cdn`],
+        ['https://game.arkoselabs.com', `https://${cleanHost}/arkose-game`],
+        ['https://t.arkoselabs.com', `https://${cleanHost}/arkose-tile`],
+        ['https://assets.arkoselabs.com', `https://${cleanHost}/arkose-assets`],
+        ['https://roblox-images.arkoselabs.com', `https://${cleanHost}/arkose-images`],
+        ['https://media.arkoselabs.com', `https://${cleanHost}/arkose-media`],
+        ['https://api.arkoselabs.com', `https://${cleanHost}/arkose-api2`],
+        ['https://data.arkoselabs.com', `https://${cleanHost}/arkose-data`],
+        ['https://logs.arkoselabs.com', `https://${cleanHost}/arkose-logs`],
+        ['https://metrics.arkoselabs.com', `https://${cleanHost}/arkose-metrics`],
+        ['https://settings.arkoselabs.com', `https://${cleanHost}/arkose-settings`],
+        ['https://verify.arkoselabs.com', `https://${cleanHost}/arkose-verify`],
+        ['https://challenge.arkoselabs.com', `https://${cleanHost}/arkose-challenge`],
+        ['https://session.arkoselabs.com', `https://${cleanHost}/arkose-session`],
+        ['https://token.arkoselabs.com', `https://${cleanHost}/arkose-token`],
+        ['https://pow.arkoselabs.com', `https://${cleanHost}/arkose-pow`],
+        ['https://blob.arkoselabs.com', `https://${cleanHost}/arkose-blob`],
+        ['https://config.arkoselabs.com', `https://${cleanHost}/arkose-config`],
+        ['https://render.arkoselabs.com', `https://${cleanHost}/arkose-render`],
+        ['https://static.arkoselabs.com', `https://${cleanHost}/arkose-static`],
+        ['https://www.arkoselabs.com', `https://${cleanHost}/arkose-www`],
         // Roblox challenge domain
-        ['https://challenge.roblox.com', `https://${host}/challenge`],
+        ['https://challenge.roblox.com', `https://${cleanHost}/challenge`],
     ];
     
     for (const [from, to] of domains) {
@@ -1228,6 +1261,40 @@ function rewriteUrls(body, host) {
     return result;
 }
 
+// CRITICAL: Rewrite URLs in JSON response bodies (for challenge metadata)
+function rewriteJsonUrls(obj, host) {
+    const cleanHost = host.replace(/^www\./, '');
+    
+    if (typeof obj === 'string') {
+        // Rewrite URLs in string values
+        let result = obj;
+        const entries = Object.entries(SUBDOMAIN_MAP).sort((a, b) => b[1].length - a[1].length);
+        
+        for (const [prefix, target] of entries) {
+            const domain = target.replace(/^https?:/, '');
+            // Rewrite https:// URLs
+            result = result.replace(new RegExp(`https?:${escapeRegex(domain)}`, 'g'), `https://${cleanHost}/${prefix}`);
+            // Rewrite protocol-relative URLs
+            result = result.replace(new RegExp(escapeRegex(domain), 'g'), `//${cleanHost}/${prefix}`);
+        }
+        
+        // Rewrite main Roblox domains
+        result = result.replace(/https?:\/\/www\.roblox\.com/g, `https://${cleanHost}`);
+        result = result.replace(/\/\/www\.roblox\.com/g, `//${cleanHost}`);
+        
+        return result;
+    } else if (Array.isArray(obj)) {
+        return obj.map(item => rewriteJsonUrls(item, host));
+    } else if (obj !== null && typeof obj === 'object') {
+        const result = {};
+        for (const [key, value] of Object.entries(obj)) {
+            result[key] = rewriteJsonUrls(value, host);
+        }
+        return result;
+    }
+    return obj;
+}
+
 app.use((req, res, next) => {
     const start = Date.now();
     res.on('finish', () => {
@@ -1437,6 +1504,19 @@ function createArkoseCurlProxy(prefix, target) {
                 }
             }
 
+            // CRITICAL: Rewrite URLs in JSON response bodies
+            const contentType = result.headers['content-type'] || '';
+            if (contentType.includes('application/json')) {
+                try {
+                    const jsonBody = JSON.parse(result.body.toString('utf8'));
+                    const rewrittenJson = rewriteJsonUrls(jsonBody, req.headers.host);
+                    return res.status(result.statusCode).json(rewrittenJson);
+                } catch (e) {
+                    // If JSON parsing fails, send original body
+                    console.log(`[${prefix}] ⚠️  Failed to parse JSON for URL rewriting:`, e.message);
+                }
+            }
+
             res.status(result.statusCode).send(result.body);
 
         } catch (err) {
@@ -1575,6 +1655,100 @@ for (const [prefix, target] of Object.entries(SUBDOMAIN_MAP)) {
         app.use(`/${prefix}`, createRobloxProxy(prefix, target));
     }
 }
+
+// CRITICAL: Response interceptor for challenge/continue endpoint to rewrite URLs in JSON body
+const challengeContinueProxy = createProxyMiddleware({
+    target: 'https://apis.roblox.com',
+    changeOrigin: true,
+    secure: true,
+    pathRewrite: { '^/apis-api/challenge/v1/continue': '/challenge/v1/continue' },
+    proxyTimeout: 30000,
+    timeout: 30000,
+    agent: httpsAgent,
+    selfHandleResponse: true,
+    
+    on: {
+        proxyReq: (proxyReq, req) => {
+            proxyReq.setHeader('origin', 'https://www.roblox.com');
+            proxyReq.setHeader('referer', 'https://www.roblox.com/login');
+            proxyReq.setHeader('user-agent', req.headers['user-agent'] || BROWSER_UA);
+            proxyReq.setHeader('accept', 'application/json, text/plain, */*');
+            proxyReq.setHeader('accept-language', 'en-US,en;q=0.9');
+            proxyReq.setHeader('accept-encoding', 'gzip, deflate, br');
+            proxyReq.setHeader('connection', 'keep-alive');
+            
+            if (req.headers['x-csrf-token']) proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
+            for (const h of CHALLENGE_HEADERS) {
+                if (req.headers[h]) proxyReq.setHeader(h, req.headers[h]);
+            }
+        },
+
+        proxyRes: responseInterceptor(async (buffer, proxyRes, req, res) => {
+            const host = req.headers.host || 'localhost';
+            const origin = req.headers['origin'] || `https://${host}`;
+            
+            // Strip CSP headers
+            delete proxyRes.headers['content-security-policy'];
+            delete proxyRes.headers['content-security-policy-report-only'];
+            
+            // Set CORS headers
+            res.setHeader('access-control-allow-origin', origin);
+            res.setHeader('access-control-allow-credentials', 'true');
+            res.setHeader('access-control-expose-headers', ['x-csrf-token', ...CHALLENGE_HEADERS].join(', '));
+            
+            // Rewrite cookies
+            if (proxyRes.headers['set-cookie']) {
+                res.setHeader('set-cookie', rewriteCookies(proxyRes.headers['set-cookie'], host));
+            }
+            
+            // Copy other headers
+            const headersToForward = ['content-type', 'x-csrf-token', ...CHALLENGE_HEADERS];
+            for (const h of headersToForward) {
+                if (proxyRes.headers[h]) {
+                    res.setHeader(h, proxyRes.headers[h]);
+                }
+            }
+            
+            // CRITICAL: Rewrite URLs in JSON response body
+            const contentType = proxyRes.headers['content-type'] || '';
+            if (contentType.includes('application/json')) {
+                try {
+                    const jsonBody = JSON.parse(buffer.toString('utf8'));
+                    
+                    // Rewrite challengeMetadata URLs if present
+                    if (jsonBody.challengeMetadata) {
+                        try {
+                            const meta = JSON.parse(jsonBody.challengeMetadata);
+                            const rewrittenMeta = rewriteJsonUrls(meta, host);
+                            jsonBody.challengeMetadata = JSON.stringify(rewrittenMeta);
+                            console.log('[challenge/continue] 🔄 Rewrote challengeMetadata URLs');
+                        } catch (e) {
+                            console.log('[challenge/continue] ⚠️  Failed to rewrite challengeMetadata:', e.message);
+                        }
+                    }
+                    
+                    // Rewrite any other URL fields
+                    const rewrittenBody = rewriteJsonUrls(jsonBody, host);
+                    return JSON.stringify(rewrittenBody);
+                } catch (e) {
+                    console.log('[challenge/continue] ⚠️  JSON parse failed, returning original:', e.message);
+                }
+            }
+            
+            return buffer;
+        }),
+
+        error: (err, req, res) => {
+            console.error(`[challenge/continue] ❌ ${err.code}: ${err.message}`);
+            if (!res.headersSent) {
+                res.status(502).json({ error: 'Proxy error', code: err.code });
+            }
+        }
+    }
+});
+
+// Override the challenge/continue route with our custom proxy
+app.use('/apis-api/challenge/v1/continue', challengeContinueProxy);
 
 app.use('/', createProxyMiddleware({
     target: 'https://www.roblox.com',
