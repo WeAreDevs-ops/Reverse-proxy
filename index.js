@@ -576,8 +576,9 @@ app.use('/v2', async (req, res) => {
     // Check if first part looks like an Arkose public key (UUID format)
     if (pathParts.length > 0 && ARKOSE_PUBLIC_KEY_PATTERN.test(pathParts[0])) {
         // This is an Arkose Labs captcha endpoint: /v2/{publicKey}/...
-        // Route to captcha.roblox.com which proxies to Arkose
-        console.log(`[captcha] Arkose public key detected: ${pathParts[0]}`);
+        // Arkose scripts are served from client-api.arkoselabs.com, NOT captcha.roblox.com
+        targetHost = 'client-api.arkoselabs.com';
+        console.log(`[captcha] Arkose public key detected: ${pathParts[0]} -> client-api.arkoselabs.com`);
     } else if (pathParts[0] === 'funcaptcha' || pathParts[0] === 'challenge') {
         // Funcaptcha/challenge endpoints
         console.log(`[captcha] Funcaptcha/challenge endpoint: ${req.path}`);
