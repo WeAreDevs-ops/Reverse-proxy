@@ -459,7 +459,7 @@ const API_ROUTES = [
 
     // OTP & captcha
     ['/otp-service',                      'otp-service.roblox.com'],
-    ['/captcha',                          'captcha.roblox.com'],
+    ['/captcha',                          'apis.roblox.com'],
 
     // Core APIs via location.origin
     ['/v1/account-information',           'accountinformation.roblox.com'],
