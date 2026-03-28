@@ -327,15 +327,29 @@ async function loginHandler(req, res) {
 
         // If browser already has challenge solution, send it directly
         if (hasChallenge) {
-            let result = await doLoginWithRetry(bodyStr, cookies, null, ua, req.headers);
+            // Extract CSRF token from cookies if available
+            const csrfFromCookie = cookies.match(/X-CSRF-TOKEN=([^;]+)/i)?.[1] ||
+                                   cookies.match(/csrf-token=([^;]+)/i)?.[1] || null;
+
+            // Try with cookie CSRF first, then do the dance if needed
+            let result = await doLoginWithRetry(bodyStr, cookies, csrfFromCookie, ua, req.headers);
+            console.log(`   Challenge login attempt 1: ${result.statusCode}`);
+
             if (result.statusCode === 403 && result.headers['x-csrf-token']) {
+                const csrfToken = result.headers['x-csrf-token'];
+                console.log(`   Got CSRF token ${csrfToken.slice(0,8)}..., retrying with challenge headers`);
                 let cookieHeader = cookies;
                 if (result.headers['set-cookie']) {
                     const extra = [].concat(result.headers['set-cookie']).map(c => c.split(';')[0]).join('; ');
                     cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
                 }
-                result = await doLoginWithRetry(bodyStr, cookieHeader, result.headers['x-csrf-token'], ua, req.headers);
+                result = await doLoginWithRetry(bodyStr, cookieHeader, csrfToken, ua, req.headers);
+                console.log(`   Challenge login attempt 2: ${result.statusCode}`);
             }
+
+            if (result.statusCode === 200) console.log('✅ LOGIN SUCCESS (with challenge)');
+            else console.log(`❌ Challenge login failed: ${result.statusCode}`);
+
             return forwardLoginResponse(res, result, host, origin, deviceId);
         }
 
@@ -615,11 +629,16 @@ app.use('/v2', async (req, res) => {
     } else if (ARKOSE_PUBLIC_KEY_PATTERN.test(pathParts[0])) {
         const filename = pathParts[pathParts.length - 1] || '';
         if (filename === 'api.js') {
+            // api.js needs /v2/ prefix on roblox-api.arkoselabs.com
+            // Express strips /v2 from req.path, so we add it back
             targetHost = 'roblox-api.arkoselabs.com';
-            console.log(`[captcha] api.js -> roblox-api.arkoselabs.com`);
+            targetPath = '/v2' + targetPath;
+            console.log(`[captcha] api.js -> roblox-api.arkoselabs.com${targetPath}`);
         } else {
+            // settings.json etc on arkoselabs.roblox.com also need /v2/ prefix
             targetHost = 'arkoselabs.roblox.com';
-            console.log(`[captcha] ${filename} -> arkoselabs.roblox.com`);
+            targetPath = '/v2' + targetPath;
+            console.log(`[captcha] ${filename} -> arkoselabs.roblox.com${targetPath}`);
         }
     } else if (pathParts[0] === 'funcaptcha' || pathParts[0] === 'challenge') {
         console.log(`[captcha] Funcaptcha/challenge: ${req.path}`);
