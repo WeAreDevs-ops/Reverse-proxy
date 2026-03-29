@@ -455,10 +455,51 @@ app.use('/challenge/v1/continue', express.raw({ type: '*/*' }), async (req, res)
             bodyObj = {};
         }
 
-        console.log(`[challenge/continue] Challenge type (original): ${bodyObj.challengeType || 'unknown'}`);
-        console.log(`[challenge/continue] Challenge ID: ${bodyObj.challengeID || bodyObj.challengeId || 'none'}`);
+        const originalType = bodyObj.challengeType || 'unknown';
+        const challengeId   = bodyObj.challengeID || bodyObj.challengeId || '';
+        console.log(`[challenge/continue] Challenge type (original): ${originalType}`);
+        console.log(`[challenge/continue] Challenge ID: ${challengeId}`);
 
-        // Force challengeType to "chef" — Roblox backend always requires this
+        // ─────────────────────────────────────────────────────────
+        // PROOF OF WORK SHORT-CIRCUIT
+        // When challengeType is "proofofwork", Roblox sets useContinueMode: false
+        // in the challenge metadata — meaning /challenge/v1/continue must NOT be called.
+        // The PoW solution was already validated by /proof-of-work-service/v1/pow-puzzle.
+        // We intercept here and return a fake 200 so Challenge.js proceeds straight
+        // to retrying login with the redemptionToken in rblx-challenge-metadata.
+        // ─────────────────────────────────────────────────────────
+        if (originalType === 'proofofwork') {
+            // Parse metadata to extract redemptionToken and sessionId
+            let powMeta = {};
+            try {
+                const raw = bodyObj.challengeMetadata;
+                powMeta = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+            } catch (e) {}
+
+            const redemptionToken = powMeta.redemptionToken || '';
+            const sessionId       = powMeta.sessionId       || '';
+
+            console.log(`[challenge/continue] PoW short-circuit — skipping /continue`);
+            console.log(`[challenge/continue] redemptionToken: ${redemptionToken.slice(0, 16)}...`);
+
+            // Build the metadata blob that the login retry needs in rblx-challenge-metadata
+            // Format matches what Roblox sends back after a successful /continue
+            const retryMetadata = Buffer.from(JSON.stringify({
+                redemptionToken,
+                sessionId,
+            })).toString('base64');
+
+            // Return a 200 that mimics what /continue would return for PoW
+            // challengeType: "" signals Challenge.js to proceed to login retry
+            setCors(res, origin);
+            return res.status(200).json({
+                challengeType: '',
+                challengeId:   challengeId,
+                challengeMetadata: retryMetadata,
+            });
+        }
+
+        // Force challengeType to "chef" for captcha/other challenge types
         // Official network log confirms challenge/continue must always send "chef"
         bodyObj.challengeType = 'chef';
 
@@ -469,7 +510,6 @@ app.use('/challenge/v1/continue', express.raw({ type: '*/*' }), async (req, res)
         }
 
         // Rebuild challengeMetadata as a JSON string if it arrived as an object
-        // Official format: "{\"userId\":\"...\",\"challengeId\":\"...\",\"browserTrackerId\":\"...\"}"
         if (bodyObj.challengeMetadata && typeof bodyObj.challengeMetadata === 'object') {
             bodyObj.challengeMetadata = JSON.stringify(bodyObj.challengeMetadata);
         }
