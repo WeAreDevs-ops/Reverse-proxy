@@ -596,11 +596,11 @@ for (const [prefix, target, pathPrefix] of API_ROUTES) {
 
 // ─────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────
-// ARKOSE WIDGET ENDPOINTS — arkoselabs.roblox.com
-// /fc/gt2/, /fc/a/, /fc/ca/, /pows/setup, /pows/check, /rtig, /params
-// ─────────────────────────────────────────────────────────────
+// ARKOSE WIDGET ENDPOINTS — roblox-api.arkoselabs.com
+// Pass route as pathPrefix so Express-stripped prefix is added back
+// e.g. /fc/gt2/... stays /fc/gt2/... on roblox-api.arkoselabs.com
 for (const route of ['/fc', '/pows', '/rtig', '/params']) {
-    app.use(route, createCurlProxy('roblox-api.arkoselabs.com', '', true));
+    app.use(route, createCurlProxy('roblox-api.arkoselabs.com', route, true));
 }
 
 // ─────────────────────────────────────────────────────────────
