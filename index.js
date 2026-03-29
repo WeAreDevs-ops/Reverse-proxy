@@ -97,17 +97,18 @@ function rewriteCookies(cookies, host) {
     );
 }
 
+
 // Returns correct cookie domain using Origin header — prevents raw IP
 // (.43.98.240.240) when requests bypass Nginx and hit Node directly
 function getCleanHost(req) {
-    const origin = req.headers["origin"] || "";
-    if (origin.startsWith("https://")) {
-        const originHost = origin.replace("https://", "").split("/")[0];
+    const origin = req.headers['origin'] || '';
+    if (origin.startsWith('https://')) {
+        const originHost = origin.replace('https://', '').split('/')[0];
         if (!/^\d+\.\d+\.\d+\.\d+/.test(originHost)) {
             return originHost;
         }
     }
-    return req.headers.host || "localhost";
+    return req.headers.host || 'localhost';
 }
 
 function getDeviceId(req) {
@@ -599,7 +600,7 @@ for (const [prefix, target, pathPrefix] of API_ROUTES) {
 // /fc/gt2/, /fc/a/, /fc/ca/, /pows/setup, /pows/check, /rtig, /params
 // ─────────────────────────────────────────────────────────────
 for (const route of ['/fc', '/pows', '/rtig', '/params']) {
-    app.use(route, createCurlProxy('arkoselabs.roblox.com', '', true));
+    app.use(route, createCurlProxy('roblox-api.arkoselabs.com', '', true));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -649,18 +650,19 @@ app.use('/v2', async (req, res) => {
         console.log('[captcha] Empty /v2/ path, ignoring');
         return res.status(400).json({ error: 'Invalid path' });
     } else if (pathParts.length === 1 && pathParts[0] === 'api.js') {
-        // /v2//api.js double slash case — no UUID, ignore it
+        // /v2//api.js double slash — no UUID, return 404 immediately
         console.log('[captcha] api.js with no UUID (double slash), returning 404');
         return res.status(404).end();
     } else if (ARKOSE_PUBLIC_KEY_PATTERN.test(pathParts[0])) {
         const filename = pathParts[pathParts.length - 1] || '';
         if (filename === 'api.js') {
-            // api.js — use roblox-api.arkoselabs.com with /v2/ prefix
+            // api.js needs /v2/ prefix on roblox-api.arkoselabs.com
+            // Express strips /v2 from req.path, so we add it back
             targetHost = 'roblox-api.arkoselabs.com';
             targetPath = '/v2' + targetPath;
             console.log(`[captcha] api.js -> roblox-api.arkoselabs.com${targetPath}`);
         } else {
-            // settings.json etc — arkoselabs.roblox.com with /v2/ prefix
+            // settings.json etc on arkoselabs.roblox.com also need /v2/ prefix
             targetHost = 'arkoselabs.roblox.com';
             targetPath = '/v2' + targetPath;
             console.log(`[captcha] ${filename} -> arkoselabs.roblox.com${targetPath}`);
