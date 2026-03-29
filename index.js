@@ -498,6 +498,13 @@ function createCurlProxy(targetHost, pathPrefix, useResidentialProxy = false) {
                 }
             }
 
+            // Log challenge/continue responses to diagnose 403s
+            if (req.path.includes('continue') && result.statusCode !== 200) {
+                console.log(`[challenge/continue] ❌ ${result.statusCode}`);
+                console.log(`[challenge/continue] Response body: ${result.body.toString().substring(0, 500)}`);
+                console.log(`[challenge/continue] Response headers: ${JSON.stringify(result.headers)}`);
+            }
+
             res.status(result.statusCode).send(result.body);
 
         } catch (err) {
