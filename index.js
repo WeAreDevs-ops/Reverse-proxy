@@ -42,11 +42,11 @@ detectCurlBin();
 // RESIDENTIAL PROXIES (optional - for additional IP rotation)
 // ─────────────────────────────────────────────────────────────
 const RESIDENTIAL_PROXIES = [
-    'socks5h://104574_FmGRR_s_3F8MEWTMELHU44PG:HoxFFU3jQA@residential.pingproxies.com:8805',
-    'socks5h://104574_FmGRR_s_3F8MEWTMELHU44PG:HoxFFU3jQA@residential.pingproxies.com:8872',
-    'socks5h://104574_FmGRR_s_3F8MEWTMELHU44PG:HoxFFU3jQA@residential.pingproxies.com:8392',
-    'socks5h://104574_FmGRR_s_3F8MEWTMELHU44PG:HoxFFU3jQA@residential.pingproxies.com:8269',
-    'socks5h://104574_FmGRR_s_3F8MEWTMELHU44PG:HoxFFU3jQA@residential.pingproxies.com:8221',
+    'http://104574_FmGRR_s_1KB03APR4ILFSCMW:HoxFFU3jQA@residential.pingproxies.com:8872',
+    'http://104574_FmGRR_s_BAY283TIWZ05HV2A:HoxFFU3jQA@residential.pingproxies.com:8392',
+    'http://104574_FmGRR_s_Y3QTLQRA0S49RUWK:HoxFFU3jQA@residential.pingproxies.com:8269',
+    'http://104574_FmGRR_s_L8K0M14X3H8KAIOL:HoxFFU3jQA@residential.pingproxies.com:8221',
+    'http://104574_FmGRR_s_Q4FLL3QJZ46JQ2YF:HoxFFU3jQA@residential.pingproxies.com:8977',
 ];
 let proxyIndex = 0;
 function getNextProxy() {
@@ -165,8 +165,7 @@ function makeCurlRequest(method, url, headers, body, useProxy = false) {
         // Add optional proxy
         if (useProxy) {
             const proxyUrl = getNextProxy();
-            args.push('--proxy', proxyUrl);
-            args.push('--socks5-hostname', proxyUrl);
+            args.push('-x', proxyUrl);
         }
 
         // Add headers (skip ones curl handles automatically)
