@@ -69,6 +69,11 @@ const CHALLENGE_HEADERS = [
     'x-retry-attempt',
 ];
 
+// Cache for PoW challenge metadata keyed by challengeId
+// Stores the original rblx-challenge-metadata from the login 403
+// so we can rebuild the correct retry metadata after PoW solve
+const powMetadataCache = new Map();
+
 // ─────────────────────────────────────────────────────────────
 // SILENCE bundleVerifier.js — no file needed, served inline
 // Catches both the CDN hash version and the /js/utilities/ path
@@ -418,7 +423,19 @@ async function loginHandler(req, res) {
         }
 
         if (final.statusCode === 200) console.log('✅ LOGIN SUCCESS');
-        else if (final.headers['rblx-challenge-id']) console.log('🧩 Challenge required');
+        else if (final.headers['rblx-challenge-id']) {
+            console.log('🧩 Challenge required');
+            // Cache original metadata so PoW short-circuit can rebuild the correct retry blob
+            const cid = final.headers['rblx-challenge-id'];
+            const meta = final.headers['rblx-challenge-metadata'];
+            if (cid && meta) {
+                powMetadataCache.set(cid, meta);
+                // Clean up old entries (keep max 100)
+                if (powMetadataCache.size > 100) {
+                    powMetadataCache.delete(powMetadataCache.keys().next().value);
+                }
+            }
+        }
         else console.log(`❌ Login failed: ${final.statusCode}`);
 
         forwardLoginResponse(res, final, host, origin, deviceId);
@@ -477,17 +494,33 @@ app.use('/challenge/v1/continue', express.raw({ type: '*/*' }), async (req, res)
             } catch (e) {}
 
             const redemptionToken = powMeta.redemptionToken || '';
-            const sessionId       = powMeta.sessionId       || '';
 
             console.log(`[challenge/continue] PoW short-circuit — skipping /continue`);
             console.log(`[challenge/continue] redemptionToken: ${redemptionToken.slice(0, 16)}...`);
 
-            // Build the metadata blob that the login retry needs in rblx-challenge-metadata
-            // Format matches what Roblox sends back after a successful /continue
-            const retryMetadata = Buffer.from(JSON.stringify({
-                redemptionToken,
-                sessionId,
-            })).toString('base64');
+            // Rebuild the FULL original metadata structure from the cached login 403 response
+            // Roblox requires the complete blob (with requestPath, sharedParameters etc)
+            // with redemptionToken filled in — not just {redemptionToken, sessionId}
+            let retryMetadata;
+            const cachedRaw = powMetadataCache.get(challengeId);
+            if (cachedRaw) {
+                try {
+                    const cachedObj = JSON.parse(Buffer.from(cachedRaw, 'base64').toString('utf8'));
+                    cachedObj.redemptionToken = redemptionToken;
+                    retryMetadata = Buffer.from(JSON.stringify(cachedObj)).toString('base64');
+                    console.log(`[challenge/continue] Using cached full metadata for ${challengeId}`);
+                    powMetadataCache.delete(challengeId);
+                } catch (e) {
+                    console.warn(`[challenge/continue] Failed to parse cached metadata: ${e.message}`);
+                }
+            }
+
+            if (!retryMetadata) {
+                // Fallback: minimal blob (may still fail but better than nothing)
+                const sessionId = powMeta.sessionId || '';
+                retryMetadata = Buffer.from(JSON.stringify({ redemptionToken, sessionId })).toString('base64');
+                console.warn(`[challenge/continue] No cached metadata found for ${challengeId} — using minimal fallback`);
+            }
 
             // Return a 200 that mimics what /continue would return for PoW
             // challengeType: "" signals Challenge.js to proceed to login retry
