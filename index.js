@@ -375,8 +375,42 @@ async function loginHandler(req, res) {
             const csrfFromCookie = cookies.match(/X-CSRF-TOKEN=([^;]+)/i)?.[1] ||
                                    cookies.match(/csrf-token=([^;]+)/i)?.[1] || null;
 
+            // ── PoW metadata rebuild ──────────────────────────────────
+            // The browser sends a minimal rblx-challenge-metadata blob
+            // {redemptionToken, sessionId} but Roblox requires the full
+            // original structure. Rebuild it from the cache here.
+            const challengeHeaders = { ...req.headers };
+            const incomingChallengeId = req.headers['rblx-challenge-id'] || '';
+            const incomingMeta = req.headers['rblx-challenge-metadata'] || '';
+            const incomingType = req.headers['rblx-challenge-type'] || '';
+
+            if (incomingType === 'proofofwork' && incomingChallengeId && incomingMeta) {
+                const cachedRaw = powMetadataCache.get(incomingChallengeId);
+                if (cachedRaw) {
+                    try {
+                        // Decode browser's minimal blob to get redemptionToken
+                        const browserMeta = JSON.parse(Buffer.from(incomingMeta, 'base64').toString('utf8'));
+                        const redemptionToken = browserMeta.redemptionToken || '';
+
+                        // Rebuild full structure from cache, fill in redemptionToken
+                        const cachedObj = JSON.parse(Buffer.from(cachedRaw, 'base64').toString('utf8'));
+                        cachedObj.redemptionToken = redemptionToken;
+                        const fullMeta = Buffer.from(JSON.stringify(cachedObj)).toString('base64');
+
+                        challengeHeaders['rblx-challenge-metadata'] = fullMeta;
+                        console.log(`   PoW metadata rebuilt for ${incomingChallengeId.slice(0,20)}...`);
+                        console.log(`   redemptionToken: ${redemptionToken.slice(0,16)}...`);
+                        powMetadataCache.delete(incomingChallengeId);
+                    } catch (e) {
+                        console.warn(`   Failed to rebuild PoW metadata: ${e.message}`);
+                    }
+                } else {
+                    console.warn(`   No cached metadata for ${incomingChallengeId} — sending as-is`);
+                }
+            }
+
             // Try with cookie CSRF first, then do the dance if needed
-            let result = await doLoginWithRetry(bodyStr, cookies, csrfFromCookie, ua, req.headers);
+            let result = await doLoginWithRetry(bodyStr, cookies, csrfFromCookie, ua, challengeHeaders);
             console.log(`   Challenge login attempt 1: ${result.statusCode}`);
 
             if (result.statusCode === 403 && result.headers['x-csrf-token']) {
@@ -387,7 +421,7 @@ async function loginHandler(req, res) {
                     const extra = [].concat(result.headers['set-cookie']).map(c => c.split(';')[0]).join('; ');
                     cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
                 }
-                result = await doLoginWithRetry(bodyStr, cookieHeader, csrfToken, ua, req.headers);
+                result = await doLoginWithRetry(bodyStr, cookieHeader, csrfToken, ua, challengeHeaders);
                 console.log(`   Challenge login attempt 2: ${result.statusCode}`);
             }
 
@@ -509,7 +543,7 @@ app.use('/challenge/v1/continue', express.raw({ type: '*/*' }), async (req, res)
                     cachedObj.redemptionToken = redemptionToken;
                     retryMetadata = Buffer.from(JSON.stringify(cachedObj)).toString('base64');
                     console.log(`[challenge/continue] Using cached full metadata for ${challengeId}`);
-                    powMetadataCache.delete(challengeId);
+                    // Note: cache entry kept — loginHandler will use and delete it on the actual retry
                 } catch (e) {
                     console.warn(`[challenge/continue] Failed to parse cached metadata: ${e.message}`);
                 }
