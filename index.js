@@ -725,13 +725,14 @@ app.use('/v2', async (req, res) => {
     }
 
     try {
-        // Use curl-impersonate with residential proxy for captcha endpoints
+        // Use residential proxy for security endpoints but NOT for api.js static file
+        const isApiJs = targetUrl.includes('api.js');
         const result = await makeCurlRequest(
             req.method,
             targetUrl,
             headers,
             body,
-            true // Use residential proxy for captcha (high security)
+            !isApiJs // api.js = direct, everything else = residential proxy
         );
 
         console.log(`[captcha] ← ${result.statusCode}`);
