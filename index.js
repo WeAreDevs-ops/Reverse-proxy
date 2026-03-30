@@ -749,7 +749,7 @@ function createCurlProxy(targetHost, pathPrefix, useResidentialProxy = false) {
 
 // Arkose Labs — curl-impersonate with residential proxy (high security)
 const ARKOSE_ROUTES = [
-    ['/arkose-api',     'https://roblox-api.arkoselabs.com'],
+    ['/arkose-api',     'https://arkoselabs.roblox.com'],
     ['/arkose-client',  'https://client-api.arkoselabs.com'],
     ['/arkose-cdn',     'https://cdn.arkoselabs.com'],
     ['/arkose-fc',      'https://fc.arkoselabs.com'],
@@ -842,7 +842,7 @@ for (const [prefix, target, pathPrefix] of API_ROUTES) {
 // e.g. /fc/gt2/... stays /fc/gt2/... on roblox-api.arkoselabs.com
 // ─────────────────────────────────────────────────────────────
 for (const route of ['/fc', '/pows', '/rtig', '/params']) {
-    app.use(route, createCurlProxy('roblox-api.arkoselabs.com', route, true));
+    app.use(route, createCurlProxy('arkoselabs.roblox.com', route, true));
 }
 
 // ─────────────────────────────────────────────────────────────
