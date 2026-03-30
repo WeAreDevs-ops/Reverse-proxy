@@ -566,10 +566,6 @@ app.use('/challenge/v1/continue', express.raw({ type: '*/*' }), async (req, res)
             });
         }
 
-        // Force challengeType to "chef" for captcha/other challenge types
-        // Official network log confirms challenge/continue must always send "chef"
-        bodyObj.challengeType = 'chef';
-
         // Normalize challengeID key (some clients send challengeId, Roblox wants challengeID)
         if (bodyObj.challengeId && !bodyObj.challengeID) {
             bodyObj.challengeID = bodyObj.challengeId;
