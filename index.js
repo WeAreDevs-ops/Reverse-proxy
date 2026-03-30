@@ -512,6 +512,60 @@ app.use('/challenge/v1/continue', express.raw({ type: '*/*' }), async (req, res)
         console.log(`[challenge/continue] Challenge ID: ${challengeId}`);
 
         // ─────────────────────────────────────────────────────────
+        // SUPPRESSED CAPTCHA SHORT-CIRCUIT
+        // When Arkose auto-suppresses the challenge (trusts the browser),
+        // it provides a token without showing a puzzle. In this case,
+        // /challenge/v1/continue should NOT be called to Roblox - the token is
+        // already valid and ready to use for login retry.
+        // Detect suppression by checking for sup=1 in metadata or captchaToken presence.
+        // ─────────────────────────────────────────────────────────
+        let challengeMetadata = bodyObj.challengeMetadata || '';
+        let isSuppressed = false;
+        let captchaToken = '';
+
+        // Parse metadata to check for suppression indicators
+        try {
+            const metaStr = typeof challengeMetadata === 'string' ? challengeMetadata : JSON.stringify(challengeMetadata);
+            const metaObj = typeof challengeMetadata === 'string' ? JSON.parse(challengeMetadata) : challengeMetadata;
+
+            // Check for sup=1 in unifiedCaptchaId
+            if (metaObj.unifiedCaptchaId && metaObj.unifiedCaptchaId.includes('|sup=1|')) {
+                isSuppressed = true;
+                console.log(`[challenge/continue] Detected suppression via unifiedCaptchaId`);
+            }
+
+            // Check for captchaToken in metadata (indicates suppression)
+            if (metaObj.captchaToken && metaObj.captchaToken.length > 0) {
+                captchaToken = metaObj.captchaToken;
+                console.log(`[challenge/continue] Detected captchaToken in metadata`);
+            }
+
+            // Check for sup field in metadata
+            if (metaObj.sup === 1 || metaObj.sup === '1') {
+                isSuppressed = true;
+                console.log(`[challenge/continue] Detected suppression via sup field`);
+            }
+        } catch (e) {
+            // Ignore parse errors
+        }
+
+        if (originalType === 'captcha' && (isSuppressed || captchaToken)) {
+            console.log(`[challenge/continue] 🎯 CAPTCHA SUPPRESSED - skipping /continue to Roblox`);
+            console.log(`[challenge/continue] Token ready, returning success to trigger login retry`);
+
+            // Return a 200 that signals challenge is complete
+            // This mimics what Roblox would return after a successful /continue
+            setCors(res, origin);
+            return res.status(200).json({
+                challengeType: '',  // Empty type signals completion
+                challengeId: challengeId,
+                challengeMetadata: typeof challengeMetadata === 'string' 
+                    ? challengeMetadata 
+                    : JSON.stringify(challengeMetadata),
+            });
+        }
+
+        // ─────────────────────────────────────────────────────────
         // PROOF OF WORK SHORT-CIRCUIT
         // When challengeType is "proofofwork", Roblox sets useContinueMode: false
         // in the challenge metadata — meaning /challenge/v1/continue must NOT be called.
@@ -1064,49 +1118,15 @@ const INJECTED_SCRIPT = `<script>
 (function() {
     // Store challenge info globally for debugging
     window.__rblxChallengeInfo = {};
-    window.__rblxCaptchaSuppressed = false;
-    window.__rblxCaptchaToken = null;
-    
-    // Intercept message events from Arkose Labs iframe
-    window.addEventListener('message', function(event) {
-        if (event.data && event.data.eventId === 'ChallengeSuppressed') {
-            console.log('[Proxy] 🎯 Captcha SUPPRESSED! Token:', event.data.payload?.captchaToken);
-            window.__rblxCaptchaSuppressed = true;
-            window.__rblxCaptchaToken = event.data.payload?.captchaToken;
-        }
-    }, false);
     
     var _fetch = window.fetch;
     window.fetch = function(resource, init) {
-        var url = typeof resource === 'string' ? resource : resource.url;
-        
-        // CRITICAL: Block /challenge/v1/continue when captcha was suppressed
-        if (url.includes('/challenge/v1/continue') && window.__rblxCaptchaSuppressed) {
-            console.log('[Proxy] 🚫 Blocking /continue - captcha was suppressed');
-            console.log('[Proxy] ✅ Challenge already complete, token ready for login retry');
-            
-            // Return fake success response to skip /continue call
-            return Promise.resolve(new Response(
-                JSON.stringify({
-                    challengeId: window.__rblxChallengeInfo.id || '',
-                    challengeType: '',  // Empty type = challenge complete
-                    redemptionToken: window.__rblxCaptchaToken
-                }),
-                {
-                    status: 200,
-                    headers: { 'Content-Type': 'application/json' }
-                }
-            ));
-        }
-        
         init = init || {};
         init.credentials = 'include';
-        
         return _fetch.call(this, resource, init).then(function(response) {
             var challengeId       = response.headers.get('rblx-challenge-id');
             var challengeType     = response.headers.get('rblx-challenge-type');
             var challengeMetadata = response.headers.get('rblx-challenge-metadata');
-            
             if (challengeId) {
                 window.__rblxChallengeId   = challengeId;
                 window.__rblxChallengeType = challengeType;
@@ -1117,7 +1137,6 @@ const INJECTED_SCRIPT = `<script>
                     timestamp: Date.now()
                 };
                 console.log('[Proxy] Challenge detected:', window.__rblxChallengeInfo);
-                
                 if (challengeMetadata) {
                     try {
                         var meta = JSON.parse(atob(challengeMetadata));
@@ -1129,52 +1148,20 @@ const INJECTED_SCRIPT = `<script>
                     }
                 }
             }
-            
             return response;
         });
     };
-    
     var _open = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url) {
         this.__url = url;
         return _open.apply(this, arguments);
     };
-    
     var _send = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.send = function() {
-        // Block /continue when suppressed (XHR version)
-        if (this.__url && this.__url.includes('/challenge/v1/continue') && window.__rblxCaptchaSuppressed) {
-            console.log('[Proxy] 🚫 Blocking XHR /continue - captcha was suppressed');
-            
-            // Fake successful response
-            var self = this;
-            Object.defineProperty(this, 'status', { value: 200, writable: false });
-            Object.defineProperty(this, 'statusText', { value: 'OK', writable: false });
-            Object.defineProperty(this, 'responseText', { 
-                value: JSON.stringify({
-                    challengeId: window.__rblxChallengeInfo.id || '',
-                    challengeType: '',
-                    redemptionToken: window.__rblxCaptchaToken
-                }), 
-                writable: false 
-            });
-            
-            setTimeout(function() {
-                if (self.onload) self.onload();
-                if (self.onreadystatechange) {
-                    Object.defineProperty(self, 'readyState', { value: 4, writable: false });
-                    self.onreadystatechange();
-                }
-            }, 0);
-            
-            return;
-        }
-        
         this.withCredentials = true;
         return _send.apply(this, arguments);
     };
-    
-    console.log('[Proxy] Interceptor loaded - Suppressed captcha handler active ✅');
+    console.log('[Proxy] Interceptor loaded - Enhanced for chef challenge');
 })();
 </script>`;
 
