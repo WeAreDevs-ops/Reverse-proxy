@@ -833,12 +833,14 @@ for (const [prefix, target, pathPrefix] of API_ROUTES) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// ARKOSE WIDGET ENDPOINTS — roblox-api.arkoselabs.com
-// Pass route as pathPrefix so Express-stripped prefix is added back
-// e.g. /fc/gt2/... stays /fc/gt2/... on roblox-api.arkoselabs.com
+// ARKOSE WIDGET ENDPOINTS — arkoselabs.roblox.com
+// NO residential proxy — it causes connection reset (curl code 56)
+// Their proxy also calls these direct, not via residential proxy
+// /fc/gt2/public_key uses residential proxy - needed for TLS fingerprint
 // ─────────────────────────────────────────────────────────────
-for (const route of ['/fc', '/pows', '/rtig', '/params']) {
-    app.use(route, createCurlProxy('arkoselabs.roblox.com', route, true));
+app.use('/fc/gt2', createCurlProxy('arkoselabs.roblox.com', '/fc/gt2', false));
+for (const route of ['/fc', '/pows', '/rtig', '/params', '/cdn']) {
+    app.use(route, createCurlProxy('arkoselabs.roblox.com', route, false));
 }
 
 // ─────────────────────────────────────────────────────────────
