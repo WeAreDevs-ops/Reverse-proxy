@@ -1156,7 +1156,15 @@ app.use('/', createProxyMiddleware({
             const ct = proxyRes.headers['content-type'] || '';
             if (!ct.includes('text/html')) return buffer;
 
+
             let body = buffer.toString('utf8');
+
+           // 🚫 REMOVE bundleVerifier injected by Roblox
+            body = body.replace(
+           /<script[^>]*bundleVerifier\.js[^>]*><\/script>/gi,''
+           );
+
+           console.log('[main] 🚫 bundleVerifier removed');
 
             // Replace the 4 Roblox JS files with our modified local versions
             body = body.replace(
