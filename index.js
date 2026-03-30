@@ -602,7 +602,7 @@ app.use('/challenge/v1/continue', express.raw({ type: '*/*' }), async (req, res)
         const url = 'https://apis.roblox.com/challenge/v1/continue';
 
         // Use residential proxy for challenge continue (high security endpoint)
-        const result = await makeCurlRequest('POST', url, headers, Buffer.from(fixedBodyStr, 'utf8'), true);
+        const result = await makeCurlRequest('POST', url, headers, Buffer.from(fixedBodyStr, 'utf8'), false);
 
         console.log(`[challenge/continue] ← ${result.statusCode}`);
 
@@ -824,7 +824,7 @@ const API_ROUTES = [
 // Register Arkose routes with residential proxy
 for (const [prefix, target] of ARKOSE_ROUTES) {
     const targetHost = target.replace(/^https?:\/\//, '').replace(/\/+$/, '');
-    app.use(prefix, createCurlProxy(targetHost, '', true));
+    app.use(prefix, createCurlProxy(targetHost, '', false));
 }
 
 // Register API routes with curl-impersonate (no residential proxy by default)
@@ -966,7 +966,7 @@ app.use('/v2', async (req, res) => {
             targetUrl,
             headers,
             body,
-            !isApiJs // api.js = direct, everything else = residential proxy
+            false// api.js = direct, everything else = residential proxy
         );
 
         console.log(`[captcha] ← ${result.statusCode}`);
@@ -1040,7 +1040,7 @@ app.use('/funcaptcha', async (req, res) => {
     }
 
     try {
-        const result = await makeCurlRequest(req.method, targetUrl, headers, body, true);
+        const result = await makeCurlRequest(req.method, targetUrl, headers, body, false);
         console.log(`[funcaptcha] ← ${result.statusCode}`);
 
         for (const [k, v] of Object.entries(result.headers)) {
