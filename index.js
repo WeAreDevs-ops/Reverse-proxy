@@ -1000,8 +1000,9 @@ app.use('/', createProxyMiddleware({
             proxyReq.setHeader('user-agent',      req.headers['user-agent'] || BROWSER_UA);
             proxyReq.setHeader('accept',          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
             proxyReq.setHeader('accept-language', 'en-US,en;q=0.9');
-            proxyReq.setHeader('accept-encoding', 'identity');
+            proxyReq.setHeader('accept-encoding', 'gzip, deflate, br');
         },
+
         proxyRes: responseInterceptor(async (buffer, proxyRes, req, res) => {
             const host   = req.headers.host || 'localhost';
             const origin = req.headers['origin'] || `https://${host}`;
@@ -1024,12 +1025,6 @@ app.use('/', createProxyMiddleware({
             if (!ct.includes('text/html')) return buffer;
 
             let body = buffer.toString('utf8');
-
-           // 🚫 REMOVE bundleVerifier injected by Roblox
-            body = body.replace(/<script[^>]*>\s*var Roblox\s*=\s*Roblox[^<]*BundleVerifierConstants[\s\S]*?<\/script>/gi, '');
-            body = body.replace(/<script[^>]*bundleVerifier\.js[^>]*><\/script>/gi, '');
-
-            console.log('[main] 🚫 bundleVerifier removed');
 
             // Replace the 4 Roblox JS files with our modified local versions
             body = body.replace(
