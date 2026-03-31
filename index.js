@@ -845,6 +845,7 @@ for (const route of ['/fc', '/pows', '/rtig', '/params', '/cdn']) {
 
 // ─────────────────────────────────────────────────────────────
 // CAPTCHA METADATA STUB
+// fc_nosuppress: '0' tells Arkose it CAN suppress (auto-solve)
 // the challenge without showing a puzzle to the user
 // ─────────────────────────────────────────────────────────────
 app.use('/captcha/v1/metadata', (req, res) => {
@@ -856,7 +857,7 @@ app.use('/captcha/v1/metadata', (req, res) => {
             ACTION_TYPE_WEB_SIGNUP: 'A2A14B1D-1AF3-C901-9988-80100049E0C0',
             ACTION_TYPE_WEB_ROBOT:  '0A34A698-7C62-4C8C-8DFB-14B0DC4BA3A3',
         },
-        fc_nosuppress: '1'  // force full session — suppressed tokens rejected by Roblox
+        fc_nosuppress: '0'
     });
 });
 
