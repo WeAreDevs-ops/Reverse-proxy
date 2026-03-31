@@ -857,7 +857,7 @@ app.use('/captcha/v1/metadata', (req, res) => {
             ACTION_TYPE_WEB_SIGNUP: 'A2A14B1D-1AF3-C901-9988-80100049E0C0',
             ACTION_TYPE_WEB_ROBOT:  '0A34A698-7C62-4C8C-8DFB-14B0DC4BA3A3',
         },
-        fc_nosuppress: '1'
+        fc_nosuppress: '0'
     });
 });
 
@@ -891,17 +891,17 @@ app.use('/v2', async (req, res) => {
         console.log('[captcha] Empty /v2/ path, ignoring');
         return res.status(400).json({ error: 'Invalid path' });
     } else if (pathParts.length === 1 && pathParts[0] === 'api.js') {
-        // /v2//api.js double slash — no UUID, return 404 immediately
-        console.log('[captcha] api.js with no UUID (double slash), returning 404');
-        return res.status(404).end();
+        // /v2//api.js — no UUID, proxy to arkoselabs.roblox.com/v2/api.js
+        targetHost = 'arkoselabs.roblox.com';
+        targetPath = '/v2/api.js';
+        console.log(`[captcha] api.js no UUID -> arkoselabs.roblox.com/v2/api.js`);
     } else if (ARKOSE_PUBLIC_KEY_PATTERN.test(pathParts[0])) {
         const filename = pathParts[pathParts.length - 1] || '';
         if (filename === 'api.js') {
-            // api.js needs /v2/ prefix on roblox-api.arkoselabs.com
-            // Express strips /v2 from req.path, so we add it back
-            targetHost = 'roblox-api.arkoselabs.com';
+            // api.js — use arkoselabs.roblox.com with /v2/ prefix
+            targetHost = 'arkoselabs.roblox.com';
             targetPath = '/v2' + targetPath;
-            console.log(`[captcha] api.js -> roblox-api.arkoselabs.com${targetPath}`);
+            console.log(`[captcha] api.js -> arkoselabs.roblox.com${targetPath}`);
         } else {
             // settings.json etc on arkoselabs.roblox.com also need /v2/ prefix
             targetHost = 'arkoselabs.roblox.com';
