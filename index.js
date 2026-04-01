@@ -876,8 +876,14 @@ app.use('/v2/:publicKey/settings.json', (req, res) => {
 // These routes MUST be registered BEFORE the generic /v2 handler
 // ─────────────────────────────────────────────────────────────
 
-// Loader script: /v2/api.js (handles both /v2/api.js and /v2//api.js)
+// Loader script: /v2/api.js (standard path)
 app.get('/v2/api.js', (req, res) => {
+    res.setHeader('Content-Type', 'application/javascript');
+    res.sendFile(path.join(__dirname, 'modified-js', 'api-loader.js'));
+});
+
+// Loader script: /v2//api.js (double slash variant - some browsers request this)
+app.get('/v2//api.js', (req, res) => {
     res.setHeader('Content-Type', 'application/javascript');
     res.sendFile(path.join(__dirname, 'modified-js', 'api-loader.js'));
 });
