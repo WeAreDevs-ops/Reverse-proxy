@@ -902,42 +902,67 @@ app.get(/^\/\d+\.\d+\.\d+\/enforcement\.[a-f0-9]+\.html$/, async (req, res) => {
     const origin = req.headers['origin'] || `https://${req.headers.host}`;
     setCors(res, origin);
 
-    const targetUrl = `https://arkoselabs.roblox.com${req.path}`;
-    console.log(`[arkose] enforcement HTML → ${targetUrl}`);
+    // Arkose enforcement HTML is hosted on CDN, NOT arkoselabs.roblox.com
+    // Try multiple hosts until one works
+    const arkoseHosts = [
+        'cdn.arkoselabs.com',
+        'client-api.arkoselabs.com',
+        'roblox-api.arkoselabs.com',
+        'assets.arkoselabs.com'
+    ];
 
-    try {
-        const result = await makeCurlRequest('GET', targetUrl, {
-            'Origin': 'https://www.roblox.com',
-            'Referer': 'https://www.roblox.com/login',
-            'User-Agent': req.headers['user-agent'] || BROWSER_UA,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }, null, false);
+    const requestHeaders = {
+        'Origin': 'https://www.roblox.com',
+        'Referer': 'https://www.roblox.com/login',
+        'User-Agent': req.headers['user-agent'] || BROWSER_UA,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+    };
 
-        console.log(`[arkose] enforcement HTML ← ${result.statusCode}`);
+    let lastError = null;
 
-        // Forward response headers
-        const skipHdrs = new Set([
-            'content-security-policy', 'content-security-policy-report-only',
-            'x-content-security-policy', 'transfer-encoding', 'connection',
-            'content-encoding', 'keep-alive', 'proxy-authenticate',
-            'proxy-authorization', 'te', 'trailers', 'upgrade'
-        ]);
+    for (const host of arkoseHosts) {
+        const targetUrl = `https://${host}${req.path}`;
+        console.log(`[arkose] enforcement HTML → ${targetUrl}`);
 
-        for (const [k, v] of Object.entries(result.headers)) {
-            if (skipHdrs.has(k)) continue;
-            if (k === 'set-cookie') {
-                res.set('Set-Cookie', rewriteCookies([].concat(v), getCleanHost(req)));
-            } else {
-                try { res.set(k, v); } catch (_) {}
+        try {
+            const result = await makeCurlRequest('GET', targetUrl, requestHeaders, null, false);
+
+            console.log(`[arkose] enforcement HTML ← ${result.statusCode} from ${host}`);
+
+            if (result.statusCode === 200) {
+                // Forward response headers
+                const skipHdrs = new Set([
+                    'content-security-policy', 'content-security-policy-report-only',
+                    'x-content-security-policy', 'transfer-encoding', 'connection',
+                    'content-encoding', 'keep-alive', 'proxy-authenticate',
+                    'proxy-authorization', 'te', 'trailers', 'upgrade'
+                ]);
+
+                for (const [k, v] of Object.entries(result.headers)) {
+                    if (skipHdrs.has(k)) continue;
+                    if (k === 'set-cookie') {
+                        res.set('Set-Cookie', rewriteCookies([].concat(v), getCleanHost(req)));
+                    } else {
+                        try { res.set(k, v); } catch (_) {}
+                    }
+                }
+
+                return res.status(result.statusCode).send(result.body);
             }
-        }
 
-        res.status(result.statusCode).send(result.body);
-    } catch (err) {
-        console.error(`[arkose] enforcement HTML error: ${err.message}`);
-        res.status(502).json({ error: 'Enforcement HTML proxy error', message: err.message });
+            // If not 200, try next host
+            console.log(`[arkose] ${host} returned ${result.statusCode}, trying next...`);
+
+        } catch (err) {
+            console.log(`[arkose] ${host} failed: ${err.message}`);
+            lastError = err;
+        }
     }
+
+    // All hosts failed
+    console.error(`[arkose] enforcement HTML error: All Arkose CDN hosts failed`);
+    res.status(502).json({ error: 'Enforcement HTML proxy error', message: lastError?.message || 'All hosts failed' });
 });
 
 // ─────────────────────────────────────────────────────────────
