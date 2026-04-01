@@ -84,7 +84,7 @@ app.get(/bundleVerifier\.js/, (req, res) => {
 // ─────────────────────────────────────────────────────────────
 // SERVE MODIFIED JS FILES
 // ─────────────────────────────────────────────────────────────
-app.use('/js', express.static(path.join(__dirname, 'modified-js'));
+app.use('/js', express.static(path.join(__dirname, 'modified-js')));
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
