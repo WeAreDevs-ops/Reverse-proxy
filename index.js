@@ -977,6 +977,18 @@ app.use('/v2', async (req, res) => {
         if (filename === 'api.js') {
             console.log(`[captcha] api.js -> should have been handled by local route`);
             return res.status(404).json({ error: 'api.js not found' });
+
+         } else if (/^enforcement\.[a-f0-9]+\.html$/i.test(filename)) {
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            return res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.html'), (err) => {
+        if (err) res.status(500).json({ error: 'Enforcement HTML not found' });
+    });
+         } else if (/^enforcement\.[a-f0-9]+\.js$/i.test(filename)) {
+            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+            return res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.js'), (err) => {
+        if (err) res.status(500).json({ error: 'Enforcement JS not found' });
+    });
+   
         } else {
             targetHost = 'arkoselabs.roblox.com';
             targetPath = '/v2' + targetPath;
