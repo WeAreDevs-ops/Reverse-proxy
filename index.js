@@ -783,6 +783,18 @@ app.use('/rtig', createCurlProxy('arkoselabs.roblox.com', '/rtig', false));
 // /cdn/fc/ - CDN assets for FunCaptcha
 app.use('/cdn/fc', createCurlProxy('arkoselabs.roblox.com', '/cdn/fc', false));
 
+// /cdn/fc/assets/ - CDN assets for FunCaptcha (explicit route)
+app.use('/cdn/fc/assets', createCurlProxy('arkoselabs.roblox.com', '/cdn/fc/assets', false));
+
+// /game/report-event/ - Game report event endpoint (Arkose)
+app.use('/game/report-event', createCurlProxy('arkoselabs.roblox.com', '/game/report-event', false));
+
+// /assets/ec-game-core/ - Game core bootstrap assets for captcha (REQUIRED for captcha to load)
+app.use('/assets/ec-game-core', createCurlProxy('arkoselabs.roblox.com', '/assets/ec-game-core', false));
+
+// /public_key/ - Public key endpoint for captcha (REQUIRED for captcha initialization)
+app.use('/public_key', createCurlProxy('arkoselabs.roblox.com', '/public_key', false));
+
 // Existing /fc/gt2 route
 app.use('/fc/gt2', createCurlProxy('arkoselabs.roblox.com', '/fc/gt2', false));
 
@@ -1254,5 +1266,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🧩 Captcha routes: /v2/* → captcha.roblox.com | /funcaptcha/* → captcha.roblox.com`);
     console.log(`🔒 ALL requests now use curl-impersonate for TLS fingerprint spoofing`);
     console.log(`✅ FIXED: Added /fc/a/, /fc/ca/, /fc/gfct/, /pows/, /params/, /rtig/ routes`);
+    console.log(`✅ FIXED: Added /assets/ec-game-core/, /public_key/, /cdn/fc/assets/, /game/report-event/ routes`);
     console.log(`✅ FIXED: Enforcement HTML handler now matches /v2/ prefix`);
 });
