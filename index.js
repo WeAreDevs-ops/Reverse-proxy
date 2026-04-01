@@ -872,6 +872,23 @@ app.use('/v2/:publicKey/settings.json', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// ARKOSE LABS API.JS - SERVE LOCAL FILES (NO PROXY)
+// These routes MUST be registered BEFORE the generic /v2 handler
+// ─────────────────────────────────────────────────────────────
+
+// Loader script: /v2/api.js (handles both /v2/api.js and /v2//api.js)
+app.get('/v2/api.js', (req, res) => {
+    res.setHeader('Content-Type', 'application/javascript');
+    res.sendFile(path.join(__dirname, 'modified-js', 'api-loader.js'));
+});
+
+// Core script: /v2/{uuid}/api.js (UUID format: uppercase hex with dashes)
+app.get(/^\/v2\/[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}\/api\.js$/i, (req, res) => {
+    res.setHeader('Content-Type', 'application/javascript');
+    res.sendFile(path.join(__dirname, 'modified-js', 'api-core.js'));
+});
+
+// ─────────────────────────────────────────────────────────────
 // ARKOSE LABS CAPTCHA /v2/ ENDPOINTS (CRITICAL FOR LOGIN CHALLENGE)
 // These endpoints serve the Arkose Labs captcha script and handle challenge verification
 // ─────────────────────────────────────────────────────────────
@@ -891,17 +908,15 @@ app.use('/v2', async (req, res) => {
         console.log('[captcha] Empty /v2/ path, ignoring');
         return res.status(400).json({ error: 'Invalid path' });
     } else if (pathParts.length === 1 && pathParts[0] === 'api.js') {
-        // /v2//api.js — no UUID, proxy to arkoselabs.roblox.com/v2/api.js
-        targetHost = 'arkoselabs.roblox.com';
-        targetPath = '/v2/api.js';
-        console.log(`[captcha] api.js no UUID -> arkoselabs.roblox.com/v2/api.js`);
+        // NOTE: This case is now handled by app.get('/v2/api.js') above
+        // This code path should not be reached due to Express route ordering
+        console.log(`[captcha] api.js no UUID -> should have been handled by local route`);
     } else if (ARKOSE_PUBLIC_KEY_PATTERN.test(pathParts[0])) {
         const filename = pathParts[pathParts.length - 1] || '';
         if (filename === 'api.js') {
-            // api.js — use arkoselabs.roblox.com with /v2/ prefix
-            targetHost = 'arkoselabs.roblox.com';
-            targetPath = '/v2' + targetPath;
-            console.log(`[captcha] api.js -> arkoselabs.roblox.com${targetPath}`);
+            // NOTE: This case is now handled by the regex route above
+            // This code path should not be reached due to Express route ordering
+            console.log(`[captcha] api.js -> should have been handled by local route`);
         } else {
             // settings.json etc on arkoselabs.roblox.com also need /v2/ prefix
             targetHost = 'arkoselabs.roblox.com';
