@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<script nonce="krdQ2LKmBuZaAHJMxBw28g">
+var nonce = "krdQ2LKmBuZaAHJMxBw28g";
+window.__webpack_nonce__ = nonce;
+// eslint-disable-line
+
+addEventListener('unhandledrejection', function(event) {
+    if (event.reason && event.reason.name === 'ChunkLoadError') {
+        parent.postMessage({
+            type: 'error',
+            payload: {
+                error: 'FC_SCRIPT_ERROR',
+                source: event.reason.request
+            }
+        }, '*');
+    }
+});
+</script>
+<meta charset="UTF-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style nonce="krdQ2LKmBuZaAHJMxBw28g">
+html, body, #root {
+    height: 100%;
+}
+
+body {
+    margin: 0;
+}
+</style>
+<script nonce="krdQ2LKmBuZaAHJMxBw28g">
+var h = document.getElementsByTagName('head')[0];
+var s = document.createElement('script');
+s.src = 'main.8cf5298e64ae46509e12.js';
+s.type = 'text/javascript';
+s.async = false;
+s.onerror = function() {
+    parent.postMessage({
+        type: 'error',
+        payload: {
+            error: 'FC_SCRIPT_ERROR',
+            source: 'main.8cf5298e64ae46509e12.js'
+        }
+    }, '*');
+};
+h.appendChild(s);
+</script>
+</head>
+<body>
+<div id="root"></div>
+</body>
+</html>
