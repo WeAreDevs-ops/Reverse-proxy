@@ -1,17 +1,40 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta http-equiv="X-UA-Compatible" content="ie=edge">
     <style>
-        html, body { margin: 0px; padding: 0px; height: 100%; }
+        html, body { margin: 0; padding: 0; height: 100%; }
         * { box-sizing: border-box; }
         #app { height: 100%; overflow: hidden; }
+
+        @keyframes spin { 
+          0% { transform: rotate(0deg) translateZ(0); }
+          100% { transform: rotate(360deg) translateZ(0); }
+        }
+        @keyframes fadeIn { 
+          0% { opacity: 0; }
+          100% { opacity: 1; }
+        }
+
+        .h1o9jYZG2hr8hElVsTr0 { 
+            position: absolute; top: 50%; left: 50%; margin-left: -15px; margin-top: -15px; 
+            z-index: 1010; border-radius: 50%; width: 30px; height: 30px; border-width: 3px; 
+            border-style: solid; border-color: rgba(0,0,0,0) rgba(0,0,0,0) rgba(0,0,0,0) rgba(0,0,0,0.2); 
+            transform: translateZ(0); box-sizing: border-box;
+            animation: 500ms linear 0s infinite spin;
+        }
+
+        .b41jtjet1y76JICPFc59 { 
+            transition: opacity 500ms ease 0s, transform 500ms ease 0s; 
+            opacity: 0; transform: scale(0.8); text-align: center; height: 100%; 
+        }
+        .b41jtjet1y76JICPFc59.active { opacity: 1; transform: scale(1); }
     </style>
 </head>
 <body>
     <div id="app"></div>
-    </body>
+    <script src="/js/enforcement.js"></script>
+</body>
 </html>
-
