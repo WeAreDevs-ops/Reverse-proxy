@@ -1,4 +1,4 @@
-6const express = require('express');
+const express = require('express');
 const { createProxyMiddleware, responseInterceptor } = require('http-proxy-middleware');
 const https = require('https');
 const http = require('http');
