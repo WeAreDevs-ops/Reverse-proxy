@@ -772,51 +772,19 @@ app.get(/(?:\/(?:cdn\/)?fc)?\/assets\/ec-game-core\/game-core\/[^/]+\/[^/]+\/(.+
     }
 });
 
-// Version-agnostic match-game remoteEntry.js — patch in a hardcoded publicPath so
-// webpack can load its chunks even when document.currentScript is unavailable
-// (which happens when the script is injected dynamically by the game-core loader).
+// Version-agnostic match-game remoteEntry.js
 app.get(/(?:\/(?:cdn\/)?fc)?\/assets\/ec-game-core\/match-game\/[^/]+\/[^/]+\/remoteEntry\.js(\?.*)?$/, (req, res) => {
-    console.log(`[match-game] Intercepted ${req.path} → serving patched 1.29.6/compat/remoteEntry.js`);
-    const fsMod = require('fs');
-    const remoteEntryPath = path.join(__dirname, 'fc/assets/ec-game-core/match-game/1.29.6/compat/remoteEntry.js');
-    let content;
-    try { content = fsMod.readFileSync(remoteEntryPath, 'utf8'); }
-    catch (e) { console.error('[match-game] Read error:', e.message); res.status(500).end(); return; }
-
-    // Derive the correct publicPath from the original request URL so chunks
-    // resolve to the right path regardless of compat/standard variant.
-    const reqDir = req.path.replace(/\/remoteEntry\.js(\?.*)?$/, '/');
-    // Strip /cdn prefix so it maps to our /fc static tree
-    const publicPath = reqDir.replace(/^\/cdn\//, '/');
-
-    // Replace the webpack "auto publicPath not supported" throw with our fallback.
-    const patched = content.replace(
-        "throw new Error('Automatic publicPath is not supported in this browser')",
-        `V=${JSON.stringify(publicPath)}`
-    );
-
-    if (patched === content) {
-        console.warn('[match-game] WARNING: publicPath patch string not found — serving unpatched');
-    } else {
-        console.log(`[match-game] Patched publicPath → ${publicPath}`);
-    }
-
+    console.log(`[match-game] Intercepted ${req.path} → serving local 1.29.6/compat/remoteEntry.js`);
     res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.send(patched);
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.sendFile(path.join(__dirname, 'fc/assets/ec-game-core/match-game/1.29.6/compat/remoteEntry.js'), (err) => {
+        if (err) { console.error('[match-game] Error:', err.message); res.status(500).end(); }
+    });
 });
 
 // Serve /cdn/fc from local fc/ folder (handles 1.29.6 chunk files, remoteEntry, etc.)
 // Falls through to Arkose proxy for anything not present locally.
 app.use('/cdn/fc', express.static(path.join(__dirname, 'fc')));
-
-// Log and proxy match-game JS chunks (everything except remoteEntry.js which is
-// handled above).  These are requested by the match-game webpack runtime using
-// the publicPath we injected.
-app.get(/(?:\/(?:cdn\/)?fc)?\/assets\/ec-game-core\/match-game\/[^/]+\/[^/]+\/(?!remoteEntry\.js)[^/]+\.js(\?.*)?$/, (req, res, next) => {
-    console.log(`[match-game-chunk] ${req.path} → proxying to Arkose`);
-    next(); // let the /fc static + generic /fc proxy handle it
-});
 
 // Serve /fc from local fc/ folder. Falls through to Arkose for missing files.
 app.use('/fc', express.static(path.join(__dirname, 'fc')));
@@ -835,37 +803,7 @@ app.use('/fc/ca', createCurlProxy('arkoselabs.roblox.com', '/fc/ca', false));
 app.use('/fc/gfct', createCurlProxy('arkoselabs.roblox.com', '/fc/gfct', false));
 
 // /fc/init-load/ - Initialization endpoint
-// Arkose sometimes returns an empty 200 body for this endpoint which breaks
-// JSON parsing in game_core_bootstrap.js.  Fall back to {} when that happens.
-app.use('/fc/init-load', async (req, res) => {
-    const origin = req.headers['origin'] || `https://${req.headers.host}`;
-    setCors(res, origin);
-    const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-    const targetUrl = `https://arkoselabs.roblox.com/fc/init-load/${qs}`;
-    const headers = {
-        'Origin': 'https://www.roblox.com',
-        'Referer': 'https://www.roblox.com/login',
-        'User-Agent': req.headers['user-agent'] || BROWSER_UA,
-        'Accept': 'application/json, text/plain, */*',
-    };
-    if (req.headers['cookie']) headers['Cookie'] = req.headers['cookie'];
-    try {
-        const result = await makeCurlRequest(req.method, targetUrl, headers, null, false);
-        const bodyStr = result.body ? result.body.toString().trim() : '';
-        if (!bodyStr || bodyStr.length === 0) {
-            console.log('[fc/init-load] Empty response from Arkose — returning fallback {}');
-            res.set('Content-Type', 'application/json');
-            res.status(200).send('{}');
-        } else {
-            res.set('Content-Type', result.headers['content-type'] || 'application/json');
-            res.status(result.statusCode).send(bodyStr);
-        }
-    } catch (e) {
-        console.error('[fc/init-load] Error:', e.message);
-        res.set('Content-Type', 'application/json');
-        res.status(200).send('{}');
-    }
-});
+app.use('/fc/init-load', createCurlProxy('arkoselabs.roblox.com', '/fc/init-load', false));
 
 // /pows/setup — intercept response and rewrite any arkoselabs URLs so the
 // PoW iframe and its sub-requests stay on the proxy domain instead of going
