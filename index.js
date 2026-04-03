@@ -803,7 +803,37 @@ app.use('/fc/ca', createCurlProxy('arkoselabs.roblox.com', '/fc/ca', false));
 app.use('/fc/gfct', createCurlProxy('arkoselabs.roblox.com', '/fc/gfct', false));
 
 // /fc/init-load/ - Initialization endpoint
-app.use('/fc/init-load', createCurlProxy('arkoselabs.roblox.com', '/fc/init-load', false));
+// Arkose sometimes returns an empty 200 body for this endpoint which breaks
+// JSON parsing in game_core_bootstrap.js.  Fall back to {} when that happens.
+app.use('/fc/init-load', async (req, res) => {
+    const origin = req.headers['origin'] || `https://${req.headers.host}`;
+    setCors(res, origin);
+    const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    const targetUrl = `https://arkoselabs.roblox.com/fc/init-load/${qs}`;
+    const headers = {
+        'Origin': 'https://www.roblox.com',
+        'Referer': 'https://www.roblox.com/login',
+        'User-Agent': req.headers['user-agent'] || BROWSER_UA,
+        'Accept': 'application/json, text/plain, */*',
+    };
+    if (req.headers['cookie']) headers['Cookie'] = req.headers['cookie'];
+    try {
+        const result = await makeCurlRequest(req.method, targetUrl, headers, null, false);
+        const bodyStr = result.body ? result.body.toString().trim() : '';
+        if (!bodyStr || bodyStr.length === 0) {
+            console.log('[fc/init-load] Empty response from Arkose — returning fallback {}');
+            res.set('Content-Type', 'application/json');
+            res.status(200).send('{}');
+        } else {
+            res.set('Content-Type', result.headers['content-type'] || 'application/json');
+            res.status(result.statusCode).send(bodyStr);
+        }
+    } catch (e) {
+        console.error('[fc/init-load] Error:', e.message);
+        res.set('Content-Type', 'application/json');
+        res.status(200).send('{}');
+    }
+});
 
 // /pows/setup — intercept response and rewrite any arkoselabs URLs so the
 // PoW iframe and its sub-requests stay on the proxy domain instead of going
