@@ -881,31 +881,6 @@ app.use('/rtig', createCurlProxy('arkoselabs.roblox.com', '/rtig', false));
 
 // /cdn/fc/assets/pow/ - PoW challenge UI: Route removed to allow direct loading from arkoselabs.roblox.com
 // The pow assets now load directly without being intercepted or modified
-/*
-app.get(/^\/cdn\/fc\/assets\/pow\/.*\/index\.html$/, async (req, res) => {
-    const origin = req.headers['origin'] || `https://${req.headers.host}`;
-    setCors(res, origin);
-    const targetUrl = `https://arkoselabs.roblox.com${req.path}`;
-    try {
-        const result = await makeCurlRequest('GET', targetUrl, {
-            'Origin':     'https://www.roblox.com',
-            'Referer':    'https://www.roblox.com/login',
-            'User-Agent': req.headers['user-agent'] || BROWSER_UA,
-            'Accept':     'text/html,*/*',
-        }, null, false);
-        let html = result.body.toString();
-        // Strip any meta CSP tags that would block subdomain telemetry calls
-        html = html.replace(/<meta[^>]+http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '');
-        console.log(`[pow-html] Stripped CSP meta from ${req.path}`);
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.status(result.statusCode).send(html);
-    } catch (err) {
-        console.error(`[pow-html] Error: ${err.message}`);
-        res.status(502).send('');
-    }
-});
-*/
 
 // /cdn/fc/ - CDN assets for FunCaptcha (generic fallback)
 app.use('/cdn/fc', createCurlProxy('arkoselabs.roblox.com', '/cdn/fc', false));
