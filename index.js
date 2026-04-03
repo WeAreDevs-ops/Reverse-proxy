@@ -736,13 +736,6 @@ app.get(/(?:\/(?:cdn\/)?fc)?\/assets\/ec-game-core\/bootstrap\/[^/]+\/[^/]+\/gam
     });
 });
 
-// Version-agnostic pow.game_core_bootstrap.js — stub it out so PoW worker
-// doesn't contact Arkose directly (returns a no-op worker script).
-app.get(/\/pow\.game_core_bootstrap\.js(\?.*)?$/, (req, res) => {
-    console.log(`[bootstrap] Stubbing pow.game_core_bootstrap: ${req.path}`);
-    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.send('self.onmessage=function(){self.postMessage({supported:false})};');
-});
 
 // Version-agnostic game-core frame index.html — serve local regardless of version.
 app.get(/(?:\/(?:cdn\/)?fc)?\/assets\/ec-game-core\/game-core\/[^/]+\/[^/]+\/index\.html(\?.*)?$/, (req, res) => {
