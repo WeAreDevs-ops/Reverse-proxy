@@ -835,9 +835,8 @@ app.use('/fc/init-load', async (req, res) => {
     }
 });
 
-// /pows/setup — intercept response and rewrite any arkoselabs URLs so the
-// PoW iframe and its sub-requests stay on the proxy domain instead of going
-// directly to arkoselabs.roblox.com.
+// /pows/setup — proxy to arkoselabs.roblox.com without any URL rewriting.
+// The PoW iframe and its assets now load directly from arkoselabs.roblox.com.
 app.get('/pows/setup', async (req, res) => {
     const origin = req.headers['origin'] || `https://${req.headers.host}`;
     const proxyOrigin = origin.startsWith('https://') ? origin : `https://${req.headers.host}`;
@@ -855,10 +854,10 @@ app.get('/pows/setup', async (req, res) => {
         }, null, false);
 
         let body = result.body.toString();
-        // Rewrite every arkoselabs.roblox.com URL to go through the proxy
-        body = body.replace(/https:\/\/arkoselabs\.roblox\.com/g, proxyOrigin);
+        // NOTE: Domain rewrite disabled - arkose pow setup loads directly from arkoselabs.roblox.com
+        // body = body.replace(/https:\/\/arkoselabs\.roblox\.com/g, proxyOrigin);
 
-        console.log(`[pows/setup] Rewrote arkoselabs URLs → ${proxyOrigin}`);
+        console.log(`[pows/setup] Serving pow setup directly from arkoselabs.roblox.com`);
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.status(result.statusCode).send(body);
@@ -880,9 +879,9 @@ app.use('/params', createCurlProxy('arkoselabs.roblox.com', '/params', false));
 // /rtig/ - Real-time image generation
 app.use('/rtig', createCurlProxy('arkoselabs.roblox.com', '/rtig', false));
 
-// /cdn/fc/assets/pow/ - PoW challenge UI: MUST come before generic /cdn/fc proxy.
-// Fetches the PoW iframe HTML and strips any CSP meta tags so report-stats
-// telemetry calls to subdomains are not blocked inside the PoW iframe.
+// /cdn/fc/assets/pow/ - PoW challenge UI: Route removed to allow direct loading from arkoselabs.roblox.com
+// The pow assets now load directly without being intercepted or modified
+/*
 app.get(/^\/cdn\/fc\/assets\/pow\/.*\/index\.html$/, async (req, res) => {
     const origin = req.headers['origin'] || `https://${req.headers.host}`;
     setCors(res, origin);
@@ -906,6 +905,7 @@ app.get(/^\/cdn\/fc\/assets\/pow\/.*\/index\.html$/, async (req, res) => {
         res.status(502).send('');
     }
 });
+*/
 
 // /cdn/fc/ - CDN assets for FunCaptcha (generic fallback)
 app.use('/cdn/fc', createCurlProxy('arkoselabs.roblox.com', '/cdn/fc', false));
