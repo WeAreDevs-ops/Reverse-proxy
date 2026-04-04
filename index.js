@@ -73,6 +73,13 @@ const CHALLENGE_HEADERS = [
 const powMetadataCache = new Map();
 
 // ─────────────────────────────────────────────────────────────
+// BLOCK SENTRY INGEST — silently drop all reporting requests
+// ─────────────────────────────────────────────────────────────
+app.all(/\/api\/\d+\/(envelope|store)\//i, (req, res) => {
+    res.status(200).json({});
+});
+
+// ─────────────────────────────────────────────────────────────
 // SILENCE bundleVerifier.js — no file needed, served inline
 // ─────────────────────────────────────────────────────────────
 app.get(/bundleVerifier\.js/, (req, res) => {
@@ -641,6 +648,49 @@ function createCurlProxy(targetHost, pathPrefix, useResidentialProxy = false) {
     };
 }
 
+// Proxy for /fc/gt2/ — rewrites only challenge_url_cdn to a relative path
+function createGt2Proxy() {
+    const base = createCurlProxy('arkoselabs.roblox.com', '/fc/gt2', false);
+    return async (req, res, next) => {
+        const originalSend = res.send.bind(res);
+        res.send = function(body) {
+            try {
+                let str = Buffer.isBuffer(body) ? body.toString('utf8') : (typeof body === 'string' ? body : JSON.stringify(body));
+                // Only rewrite challenge_url_cdn — strip the absolute arkoselabs domain to make it a relative path
+                str = str.replace(/"challenge_url_cdn":"https?:\\?\/\\?\/arkoselabs\.roblox\.com(\/[^"\\]*)"/g,
+                    (_, path) => `"challenge_url_cdn":"${path}"`);
+                return originalSend(str);
+            } catch (_) {
+                return originalSend(body);
+            }
+        };
+        return base(req, res, next);
+    };
+}
+
+// Proxy for /fc/gfct/ — rewrites only _challenge_imgs URLs to go through the proxy
+function createGfctProxy() {
+    const base = createCurlProxy('arkoselabs.roblox.com', '/fc/gfct', false);
+    return async (req, res, next) => {
+        const proxyOrigin = `https://${req.headers.host}`;
+        const originalSend = res.send.bind(res);
+        res.send = function(body) {
+            try {
+                let str = Buffer.isBuffer(body) ? body.toString('utf8') : (typeof body === 'string' ? body : JSON.stringify(body));
+                // Only rewrite URLs inside _challenge_imgs array
+                str = str.replace(/"_challenge_imgs":\[([^\]]*)\]/g, (match, imgs) => {
+                    const rewritten = imgs.replace(/https?:\\?\/\\?\/arkoselabs\.roblox\.com/g, proxyOrigin);
+                    return `"_challenge_imgs":[${rewritten}]`;
+                });
+                return originalSend(str);
+            } catch (_) {
+                return originalSend(body);
+            }
+        };
+        return base(req, res, next);
+    };
+}
+
 // ─────────────────────────────────────────────────────────────
 // ROUTE MAP
 // ─────────────────────────────────────────────────────────────
@@ -702,7 +752,6 @@ const API_ROUTES = [
     ['/trades',                           'trades.roblox.com'],
     ['/usermoderation',                   'usermoderation.roblox.com'],
     ['/lms',                              'lms.roblox.com'],
-    ['/game/report-event',                'www.roblox.com'],
     ['/ecsv2-api',                        'ecsv2.roblox.com'],
     ['/client-telemetry',                 'client-telemetry.roblox.com'],
     ['/ephemeralcounters',                'ephemeralcounters.roblox.com'],
@@ -714,6 +763,13 @@ for (const [prefix, target] of ARKOSE_ROUTES) {
     const targetHost = target.replace(/^https?:\/\//, '').replace(/\/+$/, '');
     app.use(prefix, createCurlProxy(targetHost, '', false));
 }
+
+// ── Stub metric/reporting endpoints before API routes so they never hit origin ──
+app.all('/account-security-service/v1/metrics/record', (req, res) => {
+    const origin = req.headers['origin'] || `https://${req.headers.host}`;
+    setCors(res, origin);
+    res.status(200).json({});
+});
 
 // Register API routes
 for (const [prefix, target, pathPrefix] of API_ROUTES) {
@@ -765,14 +821,21 @@ app.get(/(?:\/(?:cdn\/)?fc)?\/assets\/ec-game-core\/game-core\/[^/]+\/[^/]+\/(.+
     }
 });
 
-// Version-agnostic match-game remoteEntry.js
-app.get(/(?:\/(?:cdn\/)?fc)?\/assets\/ec-game-core\/match-game\/[^/]+\/[^/]+\/remoteEntry\.js(\?.*)?$/, (req, res) => {
-    console.log(`[match-game] Intercepted ${req.path} → serving local 1.29.6/compat/remoteEntry.js`);
-    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.sendFile(path.join(__dirname, 'fc/assets/ec-game-core/match-game/1.29.6/compat/remoteEntry.js'), (err) => {
-        if (err) { console.error('[match-game] Error:', err.message); res.status(500).end(); }
-    });
+// Version-agnostic match-game remoteEntry.js — serve local copy if it exists, else fall through to CDN proxy
+app.get(/(?:\/(?:cdn\/)?fc)?\/assets\/ec-game-core\/match-game\/[^/]+\/[^/]+\/remoteEntry\.js(\?.*)?$/, (req, res, next) => {
+    const localFile = path.join(__dirname, 'fc/assets/ec-game-core/match-game/1.29.6/compat/remoteEntry.js');
+    const fs = require('fs');
+    if (fs.existsSync(localFile)) {
+        console.log(`[match-game] Serving local remoteEntry.js`);
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        res.sendFile(localFile, (err) => {
+            if (err) { console.error('[match-game] Error:', err.message); res.status(500).end(); }
+        });
+    } else {
+        console.log(`[match-game] remoteEntry.js not found locally, falling through to CDN proxy`);
+        next();
+    }
 });
 
 // Serve /cdn/fc from local fc/ folder (handles 1.29.6 chunk files, remoteEntry, etc.)
@@ -792,8 +855,8 @@ app.use('/fc/a', createCurlProxy('arkoselabs.roblox.com', '/fc/a', false));
 // /fc/ca/ - Challenge answer endpoint
 app.use('/fc/ca', createCurlProxy('arkoselabs.roblox.com', '/fc/ca', false));
 
-// /fc/gfct/ - Game functionality endpoint
-app.use('/fc/gfct', createCurlProxy('arkoselabs.roblox.com', '/fc/gfct', false));
+// /fc/gfct/ - Game functionality endpoint (rewrites _challenge_imgs URLs only)
+app.use('/fc/gfct', createGfctProxy());
 
 // /fc/init-load/ - Initialization endpoint
 // Arkose sometimes returns an empty 200 body for this endpoint which breaks
@@ -880,14 +943,19 @@ app.use('/cdn/fc', createCurlProxy('arkoselabs.roblox.com', '/cdn/fc', false));
 
 app.use('/cdn/fc/assets', createCurlProxy('arkoselabs.roblox.com', '/cdn/fc/assets', false));
 
-// /game/report-stats - PoW telemetry stub (blocked by CSP otherwise)
-app.get('/game/report-stats', (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.status(200).send('');
+// /game/report-stats - PoW telemetry stub — silently accept any method
+app.all('/game/report-stats', (req, res) => {
+    const origin = req.headers['origin'] || `https://${req.headers.host}`;
+    setCors(res, origin);
+    res.status(200).json({});
 });
 
-// /game/report-event/ - Game report event endpoint (Arkose)
-app.use('/game/report-event', createCurlProxy('arkoselabs.roblox.com', '/game/report-event', false));
+// /game/report-event/ - Stub returning [] — silently accept any method
+app.all('/game/report-event', (req, res) => {
+    const origin = req.headers['origin'] || `https://${req.headers.host}`;
+    setCors(res, origin);
+    res.status(200).json([]);
+});
 
 // /assets/ec-game-core/ - Game core bootstrap assets for captcha (REQUIRED for captcha to load)
 app.use('/assets/ec-game-core', createCurlProxy('arkoselabs.roblox.com', '/assets/ec-game-core', false));
@@ -895,8 +963,8 @@ app.use('/assets/ec-game-core', createCurlProxy('arkoselabs.roblox.com', '/asset
 // /public_key/ - Public key endpoint for captcha (REQUIRED for captcha initialization)
 app.use('/public_key', createCurlProxy('arkoselabs.roblox.com', '/public_key', false));
 
-// Existing /fc/gt2 route
-app.use('/fc/gt2', createCurlProxy('arkoselabs.roblox.com', '/fc/gt2', false));
+// /fc/gt2/ - Public key / token endpoint (rewrites challenge_url_cdn to relative path only)
+app.use('/fc/gt2', createGt2Proxy());
 
 // Other /fc routes
 for (const route of ['/fc', '/pows', '/rtig', '/params', '/cdn']) {
@@ -904,122 +972,200 @@ for (const route of ['/fc', '/pows', '/rtig', '/params', '/cdn']) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// CAPTCHA METADATA STUB
+// CAPTCHA METADATA — proxy to real captcha.roblox.com for full key list
 // ─────────────────────────────────────────────────────────────
-app.use('/captcha/v1/metadata', (req, res) => {
-    const origin = req.headers['origin'] || `https://${req.headers.host}`;
-    setCors(res, origin);
-    res.status(200).json({
-        funCaptchaPublicKeys: {
-            ACTION_TYPE_WEB_LOGIN:  '476068BF-9607-4799-B53D-966BE98E2B81',
-            ACTION_TYPE_WEB_SIGNUP: 'A2A14B1D-1AF3-C901-9988-80100049E0C0',
-            ACTION_TYPE_WEB_ROBOT:  '0A34A698-7C62-4C8C-8DFB-14B0DC4BA3A3',
-        },
-        fc_nosuppress: '0'
-    });
-});
+app.use('/captcha/v1/metadata', createCurlProxy('captcha.roblox.com', '/v1/metadata', false));
 
 // ─────────────────────────────────────────────────────────────
 // ARKOSE SETTINGS STUB
 // ─────────────────────────────────────────────────────────────
-app.use('/v2/:publicKey/settings.json', (req, res) => {
-    const origin = req.headers['origin'] || `https://${req.headers.host}`;
-    setCors(res, origin);
-    res.status(200).json({});
-});
+app.get('/v2/:publicKey/settings.json', createCurlProxy('arkoselabs.roblox.com', '', false));
 
 // ─────────────────────────────────────────────────────────────
-// ARKOSE LABS API.JS - SERVE LOCAL FILES
+// ARKOSE LABS API.JS - LIVE PROXY FROM ARKOSE CDN
+// Real Arkose api.js files dynamically detect their own load origin,
+// so all downstream requests (enforcement, settings, game-core) route
+// back through whatever domain loaded the script — our proxy.
+// Local files are kept as fallbacks only.
 // ─────────────────────────────────────────────────────────────
-app.get('/v2/api.js', (req, res) => {
-    res.setHeader('Content-Type', 'application/javascript');
-    res.sendFile(path.join(__dirname, 'modified-js', 'api-loader.js'));
-});
+app.get('/v2/api.js', (req, res) => proxyApiJs(req, res, 'api-loader.js'));
 
-app.get('/v2//api.js', (req, res) => {
-    res.setHeader('Content-Type', 'application/javascript');
-    res.sendFile(path.join(__dirname, 'modified-js', 'api-loader.js'));
-});
+app.get('/v2//api.js', (req, res) => proxyApiJs(req, res, 'api-loader.js'));
 
-app.get(/^\/v2\/[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}\/api\.js$/i, (req, res) => {
-    res.setHeader('Content-Type', 'application/javascript');
-    res.sendFile(path.join(__dirname, 'modified-js', 'api-core.js'));
-});
+app.get(/^\/v2\/[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}\/api\.js$/i,
+    (req, res) => proxyApiJs(req, res, 'api-core.js'));
 
 // ═════════════════════════════════════════════════════════════════════════════
-// ═══ LOCAL ARKOSE ENFORCEMENT FILES - NO EXTERNAL FETCHING ═══════════════════
-// ═════════════════════════════════════════════════════════════════════════════
-// Serve local enforcement.html and enforcement.js from modified-js/ folder
-// for ANY version/hash combination. The version/hash in the URL is ignored.
+// ═══ LIVE ARKOSE ENFORCEMENT PROXY ════════════════════════════════════════════
+// Enforcement HTML and JS are fetched live from Arkose's CDN so we always get
+// the current version (4.0.16+). The enforcement JS is patched on-the-fly to:
+//   1. Accept postMessages from our proxy domain (not just *.arkoselabs.com)
+//   2. Strip Content-Security-Policy so modified scripts can execute
 // ═════════════════════════════════════════════════════════════════════════════
 
-// Pattern: /v2/{version}/enforcement.{hash}.html (e.g., /v2/4.0.15/enforcement.xxx.html)
-app.get(/^\/v2\/\d+\.\d+\.\d+\/enforcement\.[a-f0-9]+\.html$/i, (req, res) => {
+async function proxyApiJs(req, res, localFallback) {
     const origin = req.headers['origin'] || `https://${req.headers.host}`;
     setCors(res, origin);
-    
-    console.log(`[enforcement] HTML request: ${req.path} → serving local modified-js/enforcement.html`);
-    
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.b68ab7a7f261051e8c53cfe808ea9418.html'), (err) => {
-        if (err) {
-            console.error(`[enforcement] Error serving HTML: ${err.message}`);
-            res.status(500).json({ error: 'Enforcement HTML not found in modified-js/' });
+    const targetUrl = `https://arkoselabs.roblox.com${req.path}`;
+    console.log(`[api-js] Live proxy: ${req.path}`);
+    try {
+        const result = await makeCurlRequest('GET', targetUrl, {
+            'User-Agent': BROWSER_UA,
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': 'https://www.roblox.com/',
+        }, null, false);
+        if (result.statusCode >= 400) {
+            console.warn(`[api-js] CDN returned ${result.statusCode} for ${req.path}, falling back to local`);
+            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+            return res.sendFile(path.join(__dirname, 'modified-js', localFallback));
         }
-    });
-});
+        let body = result.body.toString();
+
+        // ── Inject x-proxy header into the gt2/public_key request ──
+        // Only patch the full UUID client (api-core.js), not the small loader.
+        // Exact target (from live Arkose source):
+        //   {"Content-Type":"application/x-www-form-urlencoded; charset=UTF-8"},
+        // Becomes:
+        //   {"Content-Type":"application/x-www-form-urlencoded; charset=UTF-8", 'x-proxy': window.top.document.querySelector('meta[name="proxy"]').getAttribute('value')},
+        if (localFallback === 'api-core.js') {
+            // ── Patch 1: inject x-proxy header into the gt2/public_key request ──
+            const XPROXY_SEARCH  = '{"Content-Type":"application/x-www-form-urlencoded; charset=UTF-8"},';
+            const XPROXY_REPLACE = '{"Content-Type":"application/x-www-form-urlencoded; charset=UTF-8", \'x-proxy\': window.top.document.querySelector(\'meta[name="proxy"]\').getAttribute(\'value\')},';
+            if (body.includes(XPROXY_SEARCH)) {
+                body = body.replace(XPROXY_SEARCH, XPROXY_REPLACE);
+                console.log('[api-js] ✅ Patch 1: x-proxy header injected');
+            } else {
+                console.warn('[api-js] ⚠️ Patch 1: x-proxy target not found — Arkose may have updated their bundle');
+            }
+
+            // ── Patch 2: fix settings endpoint — /settings → /settings.json ──
+            const SETTINGS_SEARCH  = 'Vo.publicKey,"/settings")';
+            const SETTINGS_REPLACE = 'Vo.publicKey,"/settings.json")';
+            if (body.includes(SETTINGS_SEARCH)) {
+                body = body.replace(SETTINGS_SEARCH, SETTINGS_REPLACE);
+                console.log('[api-js] ✅ Patch 2: /settings → /settings.json');
+            } else {
+                console.warn('[api-js] ⚠️ Patch 2: /settings target not found — Arkose may have updated their bundle');
+            }
+        }
+
+        res.status(result.statusCode)
+           .setHeader('Content-Type', 'application/javascript; charset=utf-8')
+           .setHeader('Cache-Control', 'public, max-age=3600')
+           .send(body);
+    } catch (err) {
+        console.error(`[api-js] Error: ${err.message} — falling back to ${localFallback}`);
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.sendFile(path.join(__dirname, 'modified-js', localFallback));
+    }
+}
+
+async function proxyEnforcementHtml(req, res) {
+    const origin = req.headers['origin'] || `https://${req.headers.host}`;
+    setCors(res, origin);
+    const targetUrl = `https://arkoselabs.roblox.com${req.path}`;
+    console.log(`[enforcement-html] Live proxy: ${req.path}`);
+    try {
+        const result = await makeCurlRequest('GET', targetUrl, {
+            'User-Agent': BROWSER_UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': 'https://www.roblox.com/',
+        }, null, false);
+        let body = result.body.toString();
+        // If Arkose returns a non-OK status, fall back to the local file
+        if (result.statusCode >= 400) {
+            console.warn(`[enforcement-html] CDN returned ${result.statusCode}, falling back to local file`);
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            return res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.b68ab7a7f261051e8c53cfe808ea9418.html'));
+        }
+
+        // ── Patch 1: Remove CSP meta tag from HTML body ──────────────────────
+        // Live Arkose HTML includes a <meta http-equiv="Content-Security-Policy">
+        // that locks resource loading to *.arkoselabs.com — strip it so our
+        // proxy-served assets are allowed to load.
+        body = body.replace(/<meta[^>]*http-equiv\s*=\s*["']?Content-Security-Policy["']?[^>]*>/gi, '');
+        console.log('[enforcement-html] ✅ Patch 1: CSP meta tag removed');
+
+        // ── Patch 2: Strip nonce from <style> tags ───────────────────────────
+        // The nonce is paired with the CSP above; once CSP is gone the nonce
+        // attr is harmless but removing it keeps the output clean.
+        body = body.replace(/(<style)[^>]*\snonce\s*=\s*["'][^"']*["']([^>]*>)/gi, '$1$2');
+        console.log('[enforcement-html] ✅ Patch 2: style nonce stripped');
+
+        // ── Patch 3: Remove integrity + crossorigin + data-nonce from <script> ─
+        // SRI integrity="sha384-..." makes the browser reject any script whose
+        // bytes differ from the hash — which breaks as soon as our proxy serves
+        // it or Arkose rotates the file.  Strip all three enforcement attrs.
+        body = body.replace(/\s*integrity\s*=\s*["'][^"']*["']/gi, '');
+        body = body.replace(/\s*crossorigin\s*=\s*["'][^"']*["']/gi, '');
+        body = body.replace(/\s*data-nonce\s*=\s*["'][^"']*["']/gi, '');
+        console.log('[enforcement-html] ✅ Patch 3: integrity / crossorigin / data-nonce removed from script');
+
+        res.status(result.statusCode)
+           .setHeader('Content-Type', 'text/html; charset=utf-8')
+           .setHeader('Cache-Control', 'public, max-age=3600')
+           .removeHeader('Content-Security-Policy')
+           .send(body);
+    } catch (err) {
+        console.error(`[enforcement-html] Error: ${err.message} — falling back to local file`);
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.b68ab7a7f261051e8c53cfe808ea9418.html'));
+    }
+}
+
+async function proxyEnforcementJs(req, res) {
+    const origin = req.headers['origin'] || `https://${req.headers.host}`;
+    setCors(res, origin);
+    const targetUrl = `https://arkoselabs.roblox.com${req.path}`;
+    console.log(`[enforcement-js] Live proxy: ${req.path}`);
+    try {
+        const result = await makeCurlRequest('GET', targetUrl, {
+            'User-Agent': BROWSER_UA,
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': 'https://www.roblox.com/',
+        }, null, false);
+        if (result.statusCode >= 400) {
+            console.warn(`[enforcement-js] CDN returned ${result.statusCode}, falling back to local file`);
+            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+            return res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.b68ab7a7f261051e8c53cfe808ea9418.js'));
+        }
+        let body = result.body.toString();
+        // ── Patch 1: Accept postMessages from our proxy domain ──────────────
+        // The enforcement JS checks that postMessages come from *.arkoselabs.com.
+        // Since the game-core runs from our proxy origin we must include it.
+        body = body.replace(
+            '"arkoselabs.com,funcaptcha.com"',
+            '(location.hostname+",arkoselabs.com,funcaptcha.com")'
+        );
+        body = body.replace(
+            '"funcaptcha.com,arkoselabs.com"',
+            '(location.hostname+",funcaptcha.com,arkoselabs.com")'
+        );
+        res.status(result.statusCode)
+           .setHeader('Content-Type', 'application/javascript; charset=utf-8')
+           .setHeader('Cache-Control', 'public, max-age=3600')
+           .send(body);
+    } catch (err) {
+        console.error(`[enforcement-js] Error: ${err.message} — falling back to local file`);
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.b68ab7a7f261051e8c53cfe808ea9418.js'));
+    }
+}
+
+// Pattern: /v2/{version}/enforcement.{hash}.html
+app.get(/^\/v2\/\d+\.\d+\.\d+\/enforcement\.[a-f0-9]+\.html$/i, proxyEnforcementHtml);
 
 // Pattern: /{version}/enforcement.{hash}.html (without /v2 prefix)
-app.get(/^\/\d+\.\d+\.\d+\/enforcement\.[a-f0-9]+\.html$/i, (req, res) => {
-    const origin = req.headers['origin'] || `https://${req.headers.host}`;
-    setCors(res, origin);
-    
-    console.log(`[enforcement] HTML request (no /v2): ${req.path} → serving local modified-js/enforcement.html`);
-    
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.b68ab7a7f261051e8c53cfe808ea9418.html'), (err) => {
-        if (err) {
-            console.error(`[enforcement] Error serving HTML: ${err.message}`);
-            res.status(500).json({ error: 'Enforcement HTML not found in modified-js/' });
-        }
-    });
-});
+app.get(/^\/\d+\.\d+\.\d+\/enforcement\.[a-f0-9]+\.html$/i, proxyEnforcementHtml);
 
-// Pattern: /v2/{version}/enforcement.{hash}.js (e.g., /v2/4.0.15/enforcement.xxx.js)
-app.get(/^\/v2\/\d+\.\d+\.\d+\/enforcement\.[a-f0-9]+\.js$/i, (req, res) => {
-    const origin = req.headers['origin'] || `https://${req.headers.host}`;
-    setCors(res, origin);
-    
-    console.log(`[enforcement] JS request: ${req.path} → serving local modified-js/enforcement.js`);
-    
-    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.b68ab7a7f261051e8c53cfe808ea9418.js'), (err) => {
-        if (err) {
-            console.error(`[enforcement] Error serving JS: ${err.message}`);
-            res.status(500).json({ error: 'Enforcement JS not found in modified-js/' });
-        }
-    });
-});
+// Pattern: /v2/{version}/enforcement.{hash}.js
+app.get(/^\/v2\/\d+\.\d+\.\d+\/enforcement\.[a-f0-9]+\.js$/i, proxyEnforcementJs);
 
 // Pattern: /{version}/enforcement.{hash}.js (without /v2 prefix)
-app.get(/^\/\d+\.\d+\.\d+\/enforcement\.[a-f0-9]+\.js$/i, (req, res) => {
-    const origin = req.headers['origin'] || `https://${req.headers.host}`;
-    setCors(res, origin);
-    
-    console.log(`[enforcement] JS request (no /v2): ${req.path} → serving local modified-js/enforcement.js`);
-    
-    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.b68ab7a7f261051e8c53cfe808ea9418.js'), (err) => {
-        if (err) {
-            console.error(`[enforcement] Error serving JS: ${err.message}`);
-            res.status(500).json({ error: 'Enforcement JS not found in modified-js/' });
-        }
-    });
-});
+app.get(/^\/\d+\.\d+\.\d+\/enforcement\.[a-f0-9]+\.js$/i, proxyEnforcementJs);
 
 // ─────────────────────────────────────────────────────────────
 // ARKOSE LABS CAPTCHA /v2/ ENDPOINTS
@@ -1030,36 +1176,18 @@ app.use('/v2', async (req, res) => {
 
     const pathParts = req.path.split('/').filter(p => p.length > 0);
     
-    // ═══════════════════════════════════════════════════════════
-    // ═══ SAFETY CHECK: Serve enforcement files from modified-js/ ═══
-    // If enforcement requests reach here, serve from local modified-js/
-    // ═══════════════════════════════════════════════════════════
-    if (pathParts.length >= 2 && 
-        /^\d+\.\d+\.\d+$/.test(pathParts[0]) && 
+    // ═══ SAFETY CHECK: live-proxy enforcement files if they reach /v2 handler ═══
+    if (pathParts.length >= 2 &&
+        /^\d+\.\d+\.\d+$/.test(pathParts[0]) &&
         pathParts[1].startsWith('enforcement.')) {
-        
         const filename = pathParts[1];
-        
         if (filename.endsWith('.html')) {
             console.log(`[captcha] ⚠️ Enforcement HTML reached /v2 handler: ${req.path}`);
-            res.setHeader('Content-Type', 'text/html; charset=utf-8');
-            return res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.b68ab7a7f261051e8c53cfe808ea9418.html'), (err) => {
-                if (err) {
-                    console.error(`[captcha] Error serving enforcement HTML: ${err.message}`);
-                    res.status(500).json({ error: 'Enforcement HTML not found in modified-js/' });
-                }
-            });
+            return proxyEnforcementHtml(req, res);
         }
-        
         if (filename.endsWith('.js')) {
             console.log(`[captcha] ⚠️ Enforcement JS reached /v2 handler: ${req.path}`);
-            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-            return res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.b68ab7a7f261051e8c53cfe808ea9418.js'), (err) => {
-                if (err) {
-                    console.error(`[captcha] Error serving enforcement JS: ${err.message}`);
-                    res.status(500).json({ error: 'Enforcement JS not found in modified-js/' });
-                }
-            });
+            return proxyEnforcementJs(req, res);
         }
     }
 
@@ -1079,15 +1207,9 @@ app.use('/v2', async (req, res) => {
             return res.status(404).json({ error: 'api.js not found' });
 
          } else if (/^enforcement\.[a-f0-9]+\.html$/i.test(filename)) {
-            res.setHeader('Content-Type', 'text/html; charset=utf-8');
-            return res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.b68ab7a7f261051e8c53cfe808ea9418.html'), (err) => {
-        if (err) res.status(500).json({ error: 'Enforcement HTML not found' });
-    });
+            return proxyEnforcementHtml(req, res);
          } else if (/^enforcement\.[a-f0-9]+\.js$/i.test(filename)) {
-            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-            return res.sendFile(path.join(__dirname, 'modified-js', 'enforcement.b68ab7a7f261051e8c53cfe808ea9418.js'), (err) => {
-        if (err) res.status(500).json({ error: 'Enforcement JS not found' });
-    });
+            return proxyEnforcementJs(req, res);
    
         } else {
             targetHost = 'arkoselabs.roblox.com';
@@ -1306,6 +1428,9 @@ app.use('/', createProxyMiddleware({
 
             let body = buffer.toString('utf8');
 
+            body = body.replace(/<meta[^>]*http-equiv\s*=\s*["']?content-security-policy["']?[^>]*>/gi, '');
+            body = body.replace(/<meta[^>]*http-equiv\s*=\s*["']?x-content-security-policy["']?[^>]*>/gi, '');
+
             body = body.replace(/<script[^>]*>\s*var Roblox\s*=\s*Roblox[^<]*BundleVerifierConstants[\s\S]*?<\/script>/gi, '');
             body = body.replace(/<script[^>]*bundleVerifier\.js[^>]*><\/script>/gi, '');
 
@@ -1324,20 +1449,12 @@ app.use('/', createProxyMiddleware({
                 `/js/CoreUtilities.js`
             );
             body = body.replace(
-                /(<script[^>]*data-bundlename="CoreUtilities"[^>]*><\/script>)/,
-                `$1<script id="chef-boy-ardee">\n    const ChefScript = { thunks: {}, prelude: {}, protect: {} };\n  </script><script src="https://${host}/rotating-client-service/v1/prelude/latest" id="prelude"></script>`
-            );
-            body = body.replace(
                 /https?:\/\/[^"']*\/[a-f0-9]+-Challenge\.js[^"']*/g,
                 `/js/Challenge.js`
             );
             body = body.replace(
                 /https?:\/\/[^"']*\/[a-f0-9]+-ReactLogin\.js[^"']*/g,
                 `/js/ReactLogin.js?v=1`
-            );
-            body = body.replace(
-                /https?:\/\/[^"']*\/[a-f0-9]+-PresenceStatus\.js[^"']*/g,
-                `/js/PresenceStatus.js`
             );
 
             // ── Inject page-guac-migration meta — matches working proxy exactly.
@@ -1377,7 +1494,31 @@ app.use('/', createProxyMiddleware({
             }
 
             const metaTags = generateProxyMetaTags();
-            body = body.replace('<head', `<head>${metaTags}`);
+
+            // ── Intercept direct Roblox domain requests and rewrite to proxy ──
+            const robloxInterceptor = `<script>
+(function(){
+    var ROBLOX_RE = /https?:\\/\\/([a-z0-9\\-]+\\.)?roblox\\.com(:[0-9]+)?/gi;
+    function rewrite(url){
+        if(typeof url !== 'string') return url;
+        return url.replace(ROBLOX_RE, '');
+    }
+    var _fetch = window.fetch;
+    window.fetch = function(input, init){
+        if(typeof input === 'string'){ input = rewrite(input); }
+        else if(input && typeof input === 'object' && input.url){ input = new Request(rewrite(input.url), input); }
+        return _fetch.call(this, input, init);
+    };
+    var _open = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url){
+        arguments[1] = rewrite(url);
+        return _open.apply(this, arguments);
+    };
+})();
+</script>`;
+
+            body = body.replace('<head', `<head>${robloxInterceptor}${metaTags}`);
+            console.log('[main] 🔒 Roblox URL interceptor injected');
 
             return body;
         }),
