@@ -1747,7 +1747,7 @@ app.use('/', createProxyMiddleware({
 // ─────────────────────────────────────────────────────────────
 // START
 // ─────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Proxy running on port ${PORT}`);
     console.log(`📁 Modified JS from: ${path.join(__dirname, 'modified-js')}`);
