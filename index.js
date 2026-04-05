@@ -1650,6 +1650,13 @@ app.use('/', createProxyMiddleware({
 
             console.log('[main] 🚫 bundleVerifier removed');
 
+            // ── Remove Sentry error tracking ─────────────────────────────────────
+            // Sentry is non-essential monitoring; removing it stops error reports
+            // from being sent to Sentry's servers without breaking page functionality
+             body = body.replace(/<meta[^>]*name\s*=\s*["']?sentry-meta["']?[^>]*>/gi, '');
+             body = body.replace(/<script[^>]*data-bundlename\s*=\s*["']?Sentry["']?[^>]*><\/script>/gi, '');
+             console.log('[main] 🚫 Sentry removed');
+
             const realTimeHash = '22d5ad7788622164771c3a767cdb21d73ca0b9cbfd24dd9b918fd3d748d5c5a1';
             const realTimeRegex = new RegExp(`<script[^>]*${realTimeHash}[^>]*><\\/script>`, 'g');
             body = body.replace(realTimeRegex, '');
